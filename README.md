@@ -44,13 +44,13 @@ if TLS is enabled, the api server's root CA cert is also sent in the request.
 
 ## authentication
 
-when the api server receives the request, it performs authentication to verify the request is from a user or service account it recognizes. 
+when the apiserver first starts, it parses the configuration given to it and assembles a list of suitable authenticators. for example, if a client CA has been passed in, it appends the x509 authenticator. ANOTHER EXAMPLE. a union is then performed which takes an incoming request and runs it against the entire authentication until one succeeds. if all fail, an aggregate error is returned.
 
-aggregators
+for example, the x509 auth handler will verify that the HTTP request is encoded with a TLS key signed by the CA root cert provided to the apiserver. the bearer token handler will verify that the provided token (specified in the HTTP Authorization header) exists in the provided file on disk. the password auth handler will similarly ensure that the HTTP request's basic auth credentials match its own local state.
 
-look at 
-https://github.com/kubernetes/kubernetes/blob/1c0c83d2459002b3bf7f7f20a64c64515e967358/cmd/kube-apiserver/app/server.go#L358
-and https://github.com/kubernetes/apiserver/tree/19667a1afc13cc13930c40a20f2c12bbdcaaa246/plugin/pkg/authenticator
+if authenticator approves the request, it results in an Unauthorized response and goes no further down the chain.
+
+if authentication succeeds, the Authorization header is deleted from the request, and user information is added to the request context store. this allows more handlers down the chain from accessing the previously established identity of the user. these handlers include: authorization (described next), in flight limit, impersonation, auditing, authorized, CORS, timeout for non-long running requests, and any admission plugins that are auto-loaded by the controller manager or run separately in userspace.
 
 ## authorization
 
