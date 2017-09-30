@@ -54,6 +54,10 @@ if authentication succeeds, the Authorization header is deleted from the request
 
 ## authorization
 
+the next stage of the request lifecycle concerns admission controllers. these are hooks that validate a request at the final stages before it's persisted to etcd. admission controllers are defined through a runtime flag to the apiserver. when a name is provided, the apiserver initiliazes it and adds it to a chain. it then does a union and executes each one when a request comes in. 
+
+admission controllers are usually stored in `plugin/pkg/admission` and have to satisfy a small interface. if the controller performs validation and decides that the incoming request cannot meet its requirement, it returns an error which is caught by the server and rendered into a HTTP response. if a single admission controller fails, the chain is broken and the whole request will fail.
+
 ## admission controllers
 
 ## object topology created (pods -> RS -> deployment)
