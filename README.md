@@ -54,18 +54,29 @@ if authentication succeeds, the Authorization header is deleted from the request
 
 ## authorization
 
+after authentication, the next step is authorization. the apiserver parses configuration and registers authorizers to a union chain, in the same way it did for authenticators. this means that for every request that comes in, it iterates through this list and checks to see whether the request passes an authenticator's own checks. if a single authorizer approves, the request proceeds.  if all authorizers deny the request, the request results in a Forbidden response and goes no further down the chain.
+
+supported authorizers as of v1.8 are AllowAll and DenyAll (which approve and deny all traffic respectively), webhook (interacts with an off-cluster HTTP(S) service), ABAC (enforces policies defined in a static file), RBAC (enforces RBAC roles which are added by the admin as k8s resources) and Node (which ensures that nodes, i.e. the kubelet, can only access resources hosted on itself).
+
+some authorizers as you might have noticed are dynamic (RBAC and Node) and therefore need to retrieve cluster state. for example, in the case of RBAC, when a request comes in and has been authenticated, it retrieves user information set by the authenticator and looks up to see whether that user has any associated roles which permit them to do what they want to do. accessing roles requires a list operation to be performed against the API server. to solve this problem, kubernetes uses the concept of an informer.
+
+an informer is a way for external controllers to subscribe to storage events. it provides an abstraction for subscribers to listen out for API server events (creation, update, delete) in a threadsafe manner, without having to worry about stepping on anybody else's toes. it does this by accessing a local cached representation of the resource it's following. informers provide a nice abstraction to also list and retrieve specific resources, which is useful in the case of RBAC.
+
+## admission controllers
+
 the next stage of the request lifecycle concerns admission controllers. these are hooks that validate a request at the final stages before it's persisted to etcd. admission controllers are defined through a runtime flag to the apiserver. when a name is provided, the apiserver initiliazes it and adds it to a chain. it then does a union and executes each one when a request comes in. 
 
 admission controllers are usually stored in `plugin/pkg/admission` and have to satisfy a small interface. if the controller performs validation and decides that the incoming request cannot meet its requirement, it returns an error which is caught by the server and rendered into a HTTP response. if a single admission controller fails, the chain is broken and the whole request will fail.
 
-## admission controllers
-
-## object topology created (pods -> RS -> deployment)
-
-kubernetes runs a generic web server and mutates its state using the informer pattern. in other words, a server is decorated with a set of api resources (REST mapping) defined by  
-????
-
 ## each object save to etcd
+
+when the apiserver first starts, it maps the REST API and registers handlers for every expected API operation. in our case, kubectl will have converted `kubectl run` to a POST request. since this request matches an expected pattern, when the api server receives the request it will map it to a create handler which is responsible for request validation and interacting with the storage abstraction.
+
+the create handler will read the request and deserialize the data. before passing this on the storage adapter, it will invoke performance and audit tasks that are used to gain insight into the system. 
+
+the storage registry then assembles the storage key for the object. this is configurable and is usually done by appending the object's name to the namespace, e.g. `<namespace>/<name>`. it then persists the object to the database and checks for any create errors. it then performs a get to ensure the object was created, then invokes any post-create handlers and decorators if additional finalization is required.
+
+## deployment controller
 
 ## scheduler assigns node
 
