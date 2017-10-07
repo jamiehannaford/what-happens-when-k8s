@@ -60,13 +60,17 @@ supported authorizers as of v1.8 are AllowAll and DenyAll (which approve and den
 
 some authorizers as you might have noticed are dynamic (RBAC and Node) and therefore need to retrieve cluster state. for example, in the case of RBAC, when a request comes in and has been authenticated, it retrieves user information set by the authenticator and looks up to see whether that user has any associated roles which permit them to do what they want to do. accessing roles requires a list operation to be performed against the API server. to solve this problem, kubernetes uses the concept of an informer.
 
-an informer is a way for external controllers to subscribe to storage events. it provides an abstraction for subscribers to listen out for API server events (creation, update, delete) in a threadsafe manner, without having to worry about stepping on anybody else's toes. it does this by accessing a local cached representation of the resource it's following. informers provide a nice abstraction to also list and retrieve specific resources, which is useful in the case of RBAC.
+an informer is a way for external controllers to subscribe to storage events. it provides an abstraction for subscribers to listen out for API server events (creation, update, delete) in a threadsafe manner, without having to worry about stepping on anybody else's toes. it does this by accessing a local cached representation of the resource it's following. This saves us connections against the API server, duplicate serialization costs server-side, duplicate deserialization costs controller-side, and duplicate caching costs controller-side. informers provide convenience methods to list and retrieve specific resources, which is useful in the case of RBAC.
 
 ## admission controllers
 
+whilst authorization is focused on answering if a user is authorized to perform an action, admission Control is focused on if the system will accept an authorized action. Kubernetes may choose to dismiss an authorized action based on any number of admission control strategies. **** CHANGE For example, you can have an admission plug-in enforcing all container images to come from a particular registry, and prevent other images from being deployed in pods. There are quite many admission controllers providing functionality such as enforcing limits, applying pre-create checks, and setting up default values for missing fields. ****
+
 the next stage of the request lifecycle concerns admission controllers. these are hooks that validate a request at the final stages before it's persisted to etcd. admission controllers are defined through a runtime flag to the apiserver. when a name is provided, the apiserver initiliazes it and adds it to a chain. it then does a union and executes each one when a request comes in. 
 
-admission controllers are usually stored in `plugin/pkg/admission` and have to satisfy a small interface. if the controller performs validation and decides that the incoming request cannot meet its requirement, it returns an error which is caught by the server and rendered into a HTTP response. if a single admission controller fails, the chain is broken and the whole request will fail.
+admission controllers are stored as plugins in `plugin/pkg/admission` and are compiled into kubernetes. they have to satisfy a small interface. if the controller performs validation and decides that the incoming request cannot meet its requirement, it returns an error which is caught by the server and rendered into a HTTP response. if a single admission controller fails, the chain is broken and the whole request will fail.
+
+admission controllers are usually categorised into resource management, security, defaulting, and referential consistency. commonly used resource ACs are: `InitialResources` which sets default resource limits to the resources for a container based on past usage; `LimitRanger` which sets defaults for container requests and limits, or enforce upper bounds on certain resources (no more than 2GB of memory, default to 512MB); and `ResourceQuota` which calculates and denies a number of objects (pods, rc, service load balancers) or total consumed resources (cpu, memory, disk) in a namespace.
 
 ## each object save to etcd
 
@@ -76,7 +80,52 @@ the create handler will read the request and deserialize the data. before passin
 
 the storage registry then assembles the storage key for the object. this is configurable and is usually done by appending the object's name to the namespace, e.g. `<namespace>/<name>`. it then persists the object to the database and checks for any create errors. it then performs a get to ensure the object was created, then invokes any post-create handlers and decorators if additional finalization is required.
 
-## deployment controller
+## initializers
+
+after an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of "intializers" have run for the specific resource. if no initializers are set for the resource type, it is made visible immediately. an initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. 
+
+as Ahmet Balkan notes in [his great blog post](https://ahmet.im/blog/initializers/), this allows kubernetes to perform some cool bootstrap operations, like:
+- Inject a proxy sidecar container to the pod if it has port 80, or has a particular annotation.
+- Inject a volume with test certificates to all pods in the test namespace automatically.
+- If a Secret is shorter than 20 characters (probably a password), prevent its creation.
+
+intializer configuration objects allow you to declare which initializers should run for certain object types. for example, for every deployment, ensure that MyDeploymentInitializer runs. this would mean that when a Deployment object is received, MyDeploymentInitializer is appended to the object's `metadata.initializers.pending` field. each initializer runs sequentually and removes itself from the list when it's finished processing.
+
+all throughout this process, a pod's status will be `PodInitializing`. when this bootstrap finishes the object will be considered initialized and then allow other controllers to continue the creation process.
+
+one question which you might have asked is, how can a userland controller process resources if they're not made visible by the apiserver? this problem is solved by using the `includeUninitialized` query parameter, which returns unitialized objects. 
+
+## deployment controller creates replicasets
+
+after a deployment record is stored to etcd, it is detected by the deployment controller whose job it is to listen out for changes to deployment records (adds, updates and deletes). it aims to reconcile state by synchronizing deployments with their respective pods and replica sets throughout the system. 
+
+a collection of pods make up a replica set (defined by a replica count), and replica sets make up a deployment. when a rollout to a new container image, or a scale operation, occurs, a new replica set is created.
+
+to return to our create operation: at this point in time, there exists a Deployment object in the datastore, but no associated replica sets or pods. the deployment controller now starts the process of synchronization.
+
+when the controller starts, it users informers to inform it of certain events, firing off specific functions for each event type. when a deployment is added, it's added to an internal work queue and a sync method is called. 
+
+it will first list all replica sets and pods that match the deployments label selector, and no will be returned. it will then begin rolling out its first replica set by creating the resource, assigning it its label selector, and giving it the revision number of 1. its PodSpec is copied from the Deployment's manifest, as well as other metadata including replica set. sometimes the deployment record will need to be updated after this too (for instance if the progress deadline is set).
+
+updates status.
+
+once this task finishes, it enters a wait loop waiting for the deployment to become complete. this is the job of the next controller and happens once all of its desired replicas are updated and available, and no old pods are running. 
+
+once this wait loop finishes, it will perform a cleanup, which usually involves deleting any old replica sets that exceed the revision history limit for a given deployment (by default this is disabled).
+
+## replicaset controller creates pods
+
+the next steps is the replicaset controller which is responsible for monitoring the lifecycle of replicasets and their dependent resources (pods), and acting appropriately on key events. so far, kubectl has sent a Deployment resource to the apiserver, and the deployments controller has created a new replicaset resource with the appropriate owner reference.
+
+when a new replicaset is created, the RS controller inspects the desired state and realizes there is a skew between what exists and what is required. it then seeks to reconcile this state by bumping the number of pods that belong to the replica set. it starts creating them in a careful manner, ensuring that a burst count is always matched. 
+
+the create operations is also batched, meaning that the batch sizes start at SlowStartInitialBatchSize and doubles with each successful iteration in a kind of "slow start". this aims to mitigate the risk of numerous pod bootup failures (due to quotas) that could end up placing unnecessary load on the API server. 
+
+owner references. not only does this ensure that child resources are garbage-collected once a resource managed by the controller is deleted (cascading deletion), it also provides an effective way for parent resources to not fight over their children. having a stateful representation of dependencies allows controller restarts to not affect the state of the system. this enforces a policy of isolation where controllers do not operate on resources they don't explicitly own, nor should it count these resources towards how it reconciles state. in other words, controllers are designed so that they're responsible (only take ownership of their own resources), non-interfering, and non-sharing. 
+
+sometimes, orphaned resources (i.e. those which were not created by the controller but having matching label selectors) are adopted by an owner resource if no ControllerRef already exists for it. multiple parents can race to adopt a child, but only one will be successful (the others will receive a validation error). orphans arise when their parents are deleted, but garbage collection policies prohibit child deletion.
+
+updates the status and also sets the ObservedGeneration, so that clients know the controller has processed the resource successfully.
 
 ## scheduler assigns node
 
