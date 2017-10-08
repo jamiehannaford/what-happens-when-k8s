@@ -129,6 +129,18 @@ updates the status and also sets the ObservedGeneration, so that clients know th
 
 ## scheduler assigns node
 
+The scheduler runs is a controller than runs as part of the control panel among other master components. like all other controllers, it listens out for events and attempts to reconcile state. in this case, it listens out for pods with an empty PodSpec.NodeName and attempts to find a suitable Node that the pod can reside on. 
+
+in order to find a suitable pod, a specific scheduling algorithm is used. the default scheduler registers predicates that are run against all Schedulable Nodes in the system and filters out those which are inappropriate for the workload. for example, if the PodSpec explicitly requests CPU or RAM resources, and a Node cannot meet these requests due to lack of capacity, it will be deselected. rsource capacity is calculated as the total capacity minus the sum of the resource requests of currently running containers.
+
+once appropriate nodes have been selected, a series of priority functions are run against the remaining nodes in order to rank them according to suitability. for example, in order to spread workloads across the system, it will favour nodes with less resources (i.e. containers with resource requests. as it runs these functions, it assigns each node a numerical rank. the highest ranked node is then selected for scheduling.
+
+both predicate and priority functions are extensible and can be defined by using the `--policy-config-file` flag. this introduces a degree of flexibility into the default scheduler. administrators can also run custom schedulers (controllers with custom processing logic) as Deployments. if a PodSpec contains `schedulerName`, Kubernetes will hand over scheduling for that pod to whatever scheduler thas has registered itself under that name.
+
+once the algorithm finds a node, the scheduler then creates a Binding API object whose Name and UID match the Pod, and whose ObjectReference field contains the name of the selected node. this is then POSTed to the apiserver.
+
+when the apiserver receives this Binding object, the registry deserializes the object and updates the following fields on the Pod object: it sets the NodeName to the one in the ObjectReference, it adds any relevant annotations, and sets its `PodScheduled` status condition to `True`.
+
 ## kubelet deploys container
 
 ## create service
