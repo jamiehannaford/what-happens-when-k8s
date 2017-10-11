@@ -141,7 +141,47 @@ once the algorithm finds a node, the scheduler then creates a Binding API object
 
 when the apiserver receives this Binding object, the registry deserializes the object and updates the following fields on the Pod object: it sets the NodeName to the one in the ObjectReference, it adds any relevant annotations, and sets its `PodScheduled` status condition to `True`.
 
-## kubelet deploys container
+## kubelet begins container initialization
+
+the next step is handled by the kubelet, which is an agent that runs on every node marked for handling workloads. the kubelet agent is responsible for listening out for new Pod manifests and deploying them as containers on the instance it's running on. it does this by checking the apiserver HTTP API every 20 seconds (this is configurable) for unscheduled pods whose NodeName matches the node the kubelet is running on.
+
+the kubelet pulls all of the relevant pods (i.e. those with the correct NodeName) from the server, and does a quick comparison to see if the current state is new. it then adds all update events to a sync channel and depending on the type of operation (add, update, delete) fires off the correct handler. then `syncPod` is called, which does the following:
+
+- generates a [PodStatus]() API object, which is responsible for indicating the state of a pod through its `phase`. The phase of a Pod is a simple, high-level summary of where the Pod is in its lifecycle. Examples include `Pending`, `Running`, `Succeeded`, `Failed` and `Unknown`. The phase of our pod at this time is `Pending`, because it has not be deployed as a container yet.
+
+- a series of admit handlers are run to ensure the pod is allowed to be run. Handlers include AppArmor and enforcing `NO_NEW_PRIVS`. Pods denied at this stage will stay in the `Pending` state indefinitely.
+
+- if the `cgroups-per-qos` flag has been provided, kubelet will create cgroups for the pod and apply resource parameters. This is to enable better Quality of Service (QoS) handling for pods.
+
+- data directories are created for the pod. These include the pod dir (usually `/var/run/kubelet/pods/<podID>`), its volumes dir (`<podDir>/volumes`) and its plugins dir (`<podDir>/plugins`).
+
+- the volume manager will attach and wait for any relevant volumes defined in Pod.Spec.Volumes. Depending on the type of volume being mounted, some pods will need to wait longer (e.g. cloud or NFS volumes).
+
+- all secrets defined in `Pod.Spec.ImagePullSecrets` are retrieved from the apiserver
+
+- the container runtime then runs the container (described in more detail next)
+
+## container runtime interface (CRI)
+
+the software responsible for starting and stopping containers is called the container runtime. in an effort to be more extensible, since 1.5 the kubelet has been using a plugin interface called CRI (Container Runtime Interface) to interact with container runtimes. CRI provides an abstracted interface between the kubelet and a specific container runtime, allowing them to communicate via protocol buffers and a gRPC API. the net benenit of using such an abstraction is a clean contract between kubelet and a runtime, allowing new compliant runtimes to be added with minimal overhead, since implementations are no longer tightly coupled.
+
+when a pod is first started, kubelet invokes the `RunPodSandbox` RPC. a "sandbox" is a CRI term to describe a set of containers, which in Kubernetes parlance is a pod. for hypervisor-based runtimes, a sandbox might represent a VM. for the docker service, creating a sandbox involves creating a container which holds the network namespace for the pod, checkpointing it to disk, and then starting it. the container's `resolv.conf` is updated to refer to the cluster DNS. the next step is setting up networking so that, for example, the pod has a unique IP in the cluster. this is usually handled by a CNI plugin discovered at startup time (described in more detail below).
+
+once the sandbox has finished initializing and is active, the kubelet can begin ceating individual containers for it. it first starts any init containers, then start the main containers themselves. the process for doing this is: 
+
+1. pull the image, 
+1. create the container. It does this by populating a `ContainerConfig` struct (command, image, labels, mounts, devices, environment variables etc.) with the PodSpec and then sending that with protobufs to the container runtime. For Docker, it deserializes the payload and populates its own config structures to send to the Daemon API. In the process it applies a few metadata labels (container type, log path, sandbox ID).
+1. (alpha feature) register container with CPU manager, which is a new feature in 1.8 that assigns containers to sets of CPUs on the local node by using the `UpdateContainerResources` CRI method
+1. start the container, 
+1. if post-start container lifecycle hooks are registered, run them. Hooks can either be of the type `Exec` (executes a specific command inside the container) or `HTTP` (performs a HTTP request against a container endpoint). If the PostStart hook takes too long to run, hangs, or fails, the container will never reach a `running` state
+
+## container network interface (CNI)
+
+	// This plugin assigns the pod ip, sets up routes inside the sandbox,
+	// creates interfaces etc. In theory, its jurisdiction ends with pod
+	// sandbox networking, but it might insert iptables rules or open ports
+	// on the host as well, to satisfy parts of the pod spec that aren't
+	// recognized by the CNI standard yet.
 
 ## create service
 
