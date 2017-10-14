@@ -141,13 +141,25 @@ once the algorithm finds a node, the scheduler then creates a Binding API object
 
 when the apiserver receives this Binding object, the registry deserializes the object and updates the following fields on the Pod object: it sets the NodeName to the one in the ObjectReference, it adds any relevant annotations, and sets its `PodScheduled` status condition to `True`.
 
-## kubelet begins container initialization
+## kubelet begins pod sync
 
 the next step is handled by the kubelet, which is an agent that runs on every node marked for handling workloads. the kubelet agent is responsible for listening out for new Pod manifests and deploying them as containers on the instance it's running on. it does this by checking the apiserver HTTP API every 20 seconds (this is configurable) for unscheduled pods whose NodeName matches the node the kubelet is running on.
 
 the kubelet pulls all of the relevant pods (i.e. those with the correct NodeName) from the server, and does a quick comparison to see if the current state is new. it then adds all update events to a sync channel and depending on the type of operation (add, update, delete) fires off the correct handler. then `syncPod` is called, which does the following:
 
-- generates a [PodStatus]() API object, which is responsible for indicating the state of a pod through its `phase`. The phase of a Pod is a simple, high-level summary of where the Pod is in its lifecycle. Examples include `Pending`, `Running`, `Succeeded`, `Failed` and `Unknown`. The phase of our pod at this time is `Pending`, because it has not be deployed as a container yet.
+the kubelet will now begin to start our pod! however it doesn't really have a concept of "start this pod", all it knows about is syncing the real state of affairs with a desired state. with this in mind, it defines a [`syncPod`](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet.go#L1481) method that performs the following:
+
+- if the pod is being created (ours is!), it registers some startup metrics
+
+- generates a [PodStatus]() API object, which is responsible for indicating the state of a pod through its `phase`. The phase of a Pod is a simple, high-level summary of where the Pod is in its lifecycle. Examples include `Pending`, `Running`, `Succeeded`, `Failed` and `Unknown`. 
+
+    - when the PodStatus is generated, what's interesting is that a chain of PodSyncHandlers is called on the Pod. If any of them decide that the Pod no longer belongs there, the Pod's phase will change to v1.PodFailed and it will be evicted from the Node.
+
+    - the Pod Phase is determined by the status of its init and real containers. Since our containers have not been started yet, the containers are classed as [waiting](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet_pods.go#L1244). Any pod with a waiting container is considered [Pending](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet_pods.go#L1258-L1261), which is the case in our situation!
+
+    - the Pod condition is also dictated by the condition of its containers. Since none of our containers have been created by the runtime yet, it will set the PodReady condition to False](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/status/generate.go#L70-L81).
+
+- It will then send this PodStatus to the kubelet's status manager, which will asynchronously update the etcd record via the apiserver 
 
 - a series of admit handlers are run to ensure the pod is allowed to be run. Handlers include AppArmor and enforcing `NO_NEW_PRIVS`. Pods denied at this stage will stay in the `Pending` state indefinitely.
 
@@ -161,11 +173,53 @@ the kubelet pulls all of the relevant pods (i.e. those with the correct NodeName
 
 - the container runtime then runs the container (described in more detail next)
 
-## container runtime interface (CRI)
+this syncPod callback will be invoked every XXX seconds
+
+## CRI and pause containers
 
 the software responsible for starting and stopping containers is called the container runtime. in an effort to be more extensible, since 1.5 the kubelet has been using a plugin interface called CRI (Container Runtime Interface) to interact with container runtimes. CRI provides an abstracted interface between the kubelet and a specific container runtime, allowing them to communicate via protocol buffers and a gRPC API. the net benenit of using such an abstraction is a clean contract between kubelet and a runtime, allowing new compliant runtimes to be added with minimal overhead, since implementations are no longer tightly coupled.
 
-when a pod is first started, kubelet invokes the `RunPodSandbox` RPC. a "sandbox" is a CRI term to describe a set of containers, which in Kubernetes parlance is a pod. for hypervisor-based runtimes, a sandbox might represent a VM. for the docker service, creating a sandbox involves creating a container which holds the network namespace for the pod, checkpointing it to disk, and then starting it. the container's `resolv.conf` is updated to refer to the cluster DNS. the next step is setting up networking so that, for example, the pod has a unique IP in the cluster. this is usually handled by a CNI plugin discovered at startup time (described in more detail below).
+when a pod is first started, kubelet invokes the `RunPodSandbox` RPC. a "sandbox" is a CRI term to describe a set of containers, which in Kubernetes parlance is a pod. for hypervisor-based runtimes, a sandbox might represent a VM. for the docker service, creating a sandbox involves creating a "pause" container which acts as the "parent container" for all other containers in a pod. it does so by hosting the namespaces that other containers will join (IPC, network, PID) and serving as PID 1 for each pod, allowing it to reap zombie containers. having a dedicated container allows for more efficient and reliable process reaping. 
+
+after the pause container has been created, checkpointed to disk, and started.
+
+## CNI and pod networking
+
+when the kubelet sets up networking, it delegates this task to a CNI plugin. CNI stands for container network interface and is an abstraction that allows different network providers to set up networking and communicate back to the kubelet in a standardised way. CNI works by piping JSON configuration to a CNI binary that is usually tasked with a specific responsibility. 
+
+> A CNI plugin is responsible for inserting a network interface into the container network namespace (e.g. one end of a veth pair) and making any necessary changes on the host (e.g. attaching the other end of the veth into a bridge). It should then assign the IP to the interface and setup the routes consistent with the IP Address Management section by invoking appropriate IPAM plugin.
+
+for the ADD command, the container ID is passed to the ID, along with the path to the network NS file, the interface name to set up inside the container, the path to the CNI binary, and any additional networking information, such as which DNS nameservers to use. kubelet will pass in the cluster's internal DNS server's IP address, which will ensure that the container's `resolv.conf` file is set appropriately. a list of CNI plugins (also defined in the JSON) will then by run in order.
+
+kubelet relies on `--cni-conf-dir` to find the CNI configuration. it will then find the first configuration file in that directory, and send it to the appropriate plugin binary. for example:
+
+```yaml
+{
+    "cniVersion": "0.3.1",
+    "name": "bridge",
+    "type": "bridge",
+    "bridge": "cnio0",
+    "isGateway": true,
+    "ipMasq": true,
+    "ipam": {
+        "type": "host-local",
+        "ranges": [
+          [{"subnet": "${POD_CIDR}"}]
+        ],
+        "routes": [{"dst": "0.0.0.0/0"}]
+    }
+}
+```
+
+will set up a local Linux bridge on the host. With bridge plugin, all containers (on the same host) are plugged into a bridge (virtual switch) that resides in the host network namespace. The containers receive one end of the veth pair with the other end connected to the bridge. An IP address is only assigned to one end of the veth pair -- one residing in the container. The bridge itself can also be assigned an IP address, turning it into a gateway for the containers. Alternatively, the bridge can function purely in L2 mode and would need to be bridged to the host network interface (if other than container-to-container communication on the same host is desired). The network configuration specifies the name of the bridge to be used. If the bridge is missing, the plugin will create one on first use and, if gateway mode is used, assign it an IP that was returned by IPAM plugin via the gateway field.
+
+IP allocation is handled by a IPAM plugins, which are invoked by the CNI plugin according to the configuration. similar to main plugins, IPAM ones are invoked via an executable have a standardised interface. The IPAM plugin must determine the interface IP/subnet, Gateway and Routes and return this information to the "main" plugin to apply. host-local IPAM plugin allocates ip addresses out of a set of address ranges. It stores the state locally on the host filesystem, therefore ensuring uniqueness of IP addresses on a single host.
+
+so after this process, the networking for the pause container is set up: it's been allocated a unique IP from a global pod subnet, routes have been set up inside, veth interfaces have been created, and a linux bridge on the host. 
+
+it is also possible to use overlay networking to dynamically connect host. Flannel, for example, is responsible for providing a layer 3 IPv4 network between multiple nodes in a cluster. Flannel does not control how containers are networked to the host, only how the traffic is transported between hosts. However, flannel does provide a CNI plugin for Kubernetes and a guidance on integrating with Docker. 
+
+## containers are started
 
 once the sandbox has finished initializing and is active, the kubelet can begin ceating individual containers for it. it first starts any init containers, then start the main containers themselves. the process for doing this is: 
 
@@ -174,21 +228,3 @@ once the sandbox has finished initializing and is active, the kubelet can begin 
 1. (alpha feature) register container with CPU manager, which is a new feature in 1.8 that assigns containers to sets of CPUs on the local node by using the `UpdateContainerResources` CRI method
 1. start the container, 
 1. if post-start container lifecycle hooks are registered, run them. Hooks can either be of the type `Exec` (executes a specific command inside the container) or `HTTP` (performs a HTTP request against a container endpoint). If the PostStart hook takes too long to run, hangs, or fails, the container will never reach a `running` state
-
-## container network interface (CNI)
-
-	// This plugin assigns the pod ip, sets up routes inside the sandbox,
-	// creates interfaces etc. In theory, its jurisdiction ends with pod
-	// sandbox networking, but it might insert iptables rules or open ports
-	// on the host as well, to satisfy parts of the pod spec that aren't
-	// recognized by the CNI standard yet.
-
-## create service
-
-## steps authn->etcd repeated
-
-## endpoint created
-
-## kube-proxy writes iptables rules
-
-## dns server adds A/SRV records
