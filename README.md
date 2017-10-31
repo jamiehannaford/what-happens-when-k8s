@@ -16,6 +16,8 @@ This is a living document. Contributions that add, edit, or delete content where
 
 kubectl uses client-go's discovery client to retrieve all API groups, saving this list to a file in ~/.kube/schema. It then retrieves supported versions for those groups and saves to ~. This is a cached representation of the remote server API in its current form and allows kubectl to handle some client-side validation. 
 
+However since `kubectl run` allows kubectl to collect arguments from the command-line, not much validation needs to happen, because it has the ability to structure the input data itself. If a user were to run `kubectl create -f` to a YAML or JSON file, it would use the persisted schema to ensure the user's representation of a resource matches what the API expects before sending it. This provides a degree of performance optimization through client-side validation.
+
 ## kubectl generates objects
 
 since the `run` command can actually deploy multiple resource types, kubectl will try to infer what type of resource to run if it wasn't explicitly specified with the `--generator` flag. For example, resources that have `--restart-policy=Always` are considered Deployments, those with `--restart-policy=Never` are considered pods. 
