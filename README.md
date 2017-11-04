@@ -14,73 +14,103 @@ This is a living document. Contributions that add, edit, or delete content where
 
 ## api version reconciliation
 
-kubectl uses client-go's discovery client to retrieve all API groups, saving this list to a file in ~/.kube/schema. It then retrieves supported versions for those groups and saves to ~. This is a cached representation of the remote server API in its current form and allows kubectl to handle some client-side validation. 
+The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will always fail (e.g. creating a non-supported or outdated resource) will not be sent to kube-apiserver, thereby saving precious bandwidth and CPU cycles. 
 
-However since `kubectl run` allows kubectl to collect arguments from the command-line, not much validation needs to happen, because it has the ability to structure the input data itself. If a user were to run `kubectl create -f` to a YAML or JSON file, it would use the persisted schema to ensure the user's representation of a resource matches what the API expects before sending it. This provides a degree of performance optimization through client-side validation.
+To do this, kubectl uses the official kubernetes [client]() to discover all the potential [API groups]() for a given HTTP endpoint. The API server represents its RESTful state using OpenAPI (previously Swagger) documents, so these are retrieved and persisted to disk in the `~/.kube/schema` directory. It then retrieves all supported versions for those groups and saves to `~`. Now that it has a cached representation of the API contract, kubectl can perform validation. 
+
+However, we need to hold our horses because `kubectl run` acts a bit differently. Most commands (like `kubectl create`) to kubectl reference some kind of YAML or JSON file which, to kubectl's perspective, has the potential to contain malformed or just plain wrong data structures. The run command on the other hand collects input through CLI flags, so kubectl has full control over how to use and serialize that data - so it doesn't need to perform schema validations. 
 
 ## kubectl generates objects
 
-since the `run` command can actually deploy multiple resource types, kubectl will try to infer what type of resource to run if it wasn't explicitly specified with the `--generator` flag. For example, resources that have `--restart-policy=Always` are considered Deployments, those with `--restart-policy=Never` are considered pods. 
+After the "validation" stage, kubectl then begins assembling the request it'll send to kube-apiserver. To do this it uses a concept called [generators]() to generate a Resource object and then serialize it into JSON. 
 
-it also determines other actions, e.g. whether to record the command, or whether this command is just a dry run. if not, it send maps this resource to a specific group and version, then sends it to the API
+What you might not realise is that in the run command you can actually deploy multiple resource types, not just deployments. To make that happen, kubectl will try to infer what type of resource to run if it wasn't explicitly specified with the `--generator` flag. For example, resources that have `--restart-policy=Always` are considered Deployments, those with `--restart-policy=Never` are considered pods. Another part of this inference stage is figuring out whether other actions need to be triggered: for example to record the command (for rollouts or auditing), or whether this command is just a dry run (`--dry-run`). 
 
-if an `--expose` flag is provided, it also generates a service object to send to the API.
+The final step is to construct a versioned client that maps with the OpenAPI spec for the specific API group, and then delegate request lifecycle events to the client, such as sending HTTP request and parsing the response from the kube-apiserver.
 
-## creds
+## client auth
 
-kubectl will now try to identify the best location to find your credentials. it follows the following algorithm:
+In order to send the request successfully, however, the client needs to be able to authenticate. User credentials are almost always stored in the `kubeconfig` file which resides on disk. kubectl will try to auto-detect the correct path to the file by doing the following:
 
-- if a path is specified as a flag, use that
-- otherwise $KUBECONFIG
-- otherwise look in a predictable home dir location, and use the first file found
+- if `--kubeconfig` flag is provided, easy peasy, use that.
+- if the `$KUBECONFIG` environment variable is defined, use that.
+- otherwise look in a predictable directory like `~/.kube`, and use the first file found.
 
-it then determines the current context, then the cluster to point to, and auth information. command flags take precedence over those defined in kubeconfig.
+After parsing the file, it then determines the current context to use, the current cluster to point to, and any auth information associated with the current user. If the user provided flag-specific values (such as `--username`) these take precedence and will override kubeconfig. Once it has this information, kubectl populates the client's configuration so that it is able decorate the HTTP request appropriately:
 
-objects are sent to the API with the necessary auth information encoded into the HTTP request. for the following auth types:
+- x509 certificates are sent using [`tls.TLSConfig`]() (this also includes the root CA)
+- bearer tokens are sent in the "Authorization" HTTP header
+- username and password are sent via HTTP basic authentication
+- the OpenID auth process is handled manually by the user beforehand, producing a token which is sent like a bearer token
 
-- x509 certificates are sent using golang's tlsconfig
-- bearer tokens are sent with the "Authorization" header
-- the openid auth process is handled manually by the operator beforehand, producing a token which is sent like a bearer token
+## server auth
 
-if TLS is enabled, the api server's root CA cert is also sent in the request.
+So our request has been sent, hooray! What next? This is where the kube-apiserver enters the picture. In a nutshell, the kube-server is the primary interface that clients use to persist and retrieve cluster state. To do this well, it needs to be able to verify that the client is who they say there are, this is authentication.
 
-## authentication
+How does the apiserver authenticate requests? When the server first starts, it looks at all the CLI flags the user provided and assembles a list of suitable authenticators. Let's take an example: if a `--client-ca-file` has been passed in, it appends the [x509 authenticator](); if it sees `--token-auth-file` provided, it appends the [token authenticator]() to the list. Every time a request is received, it is [run through the authenticator chain until one succeeds](): 
 
-when the apiserver first starts, it parses the configuration given to it and assembles a list of suitable authenticators. for example, if a client CA has been passed in, it appends the x509 authenticator. ANOTHER EXAMPLE. a union is then performed which takes an incoming request and runs it against the entire authentication until one succeeds. if all fail, an aggregate error is returned.
+- the x509 handler will verify that the HTTP request is encoded with a TLS key signed by the CA root cert
+- the bearer token handler will verify that the provided token (specified in the HTTP Authorization header) exists in the provided file on disk
+- the password auth handler will similarly ensure that the HTTP request's basic auth credentials match its own local state.
 
-for example, the x509 auth handler will verify that the HTTP request is encoded with a TLS key signed by the CA root cert provided to the apiserver. the bearer token handler will verify that the provided token (specified in the HTTP Authorization header) exists in the provided file on disk. the password auth handler will similarly ensure that the HTTP request's basic auth credentials match its own local state.
-
-if authenticator approves the request, it results in an Unauthorized response and goes no further down the chain.
-
-if authentication succeeds, the Authorization header is deleted from the request, and user information is added to the request context store. this allows more handlers down the chain from accessing the previously established identity of the user. these handlers include: authorization (described next), in flight limit, impersonation, auditing, authorized, CORS, timeout for non-long running requests, and any admission plugins that are auto-loaded by the controller manager or run separately in userspace.
+If every authenticator fails, the request fails and an aggregate error is returned. If authentication succeeds, the `Authorization` header is removed from the request, and user information is added to its context. This provides future validators (such as authorization and admission controllers) the ability to access the previously established identity of the user. 
 
 ## authorization
 
-after authentication, the next step is authorization. the apiserver parses configuration and registers authorizers to a union chain, in the same way it did for authenticators. this means that for every request that comes in, it iterates through this list and checks to see whether the request passes an authenticator's own checks. if a single authorizer approves, the request proceeds.  if all authorizers deny the request, the request results in a Forbidden response and goes no further down the chain.
+Okay, the request has been sent, and kube-apiserver has successfully verified we are who we say we are. What a relief! However, we're not done yet. We may be who we say we are, but are we _allowed_ to perform this action? Identity and permission are not the same thing, and in order for us to continue, the apiserver needs to authorize us.
 
-supported authorizers as of v1.8 are AllowAll and DenyAll (which approve and deny all traffic respectively), webhook (interacts with an off-cluster HTTP(S) service), ABAC (enforces policies defined in a static file), RBAC (enforces RBAC roles which are added by the admin as k8s resources) and Node (which ensures that nodes, i.e. the kubelet, can only access resources hosted on itself).
+The way kube-apiserver handles this is very similar to authentication: based on flag inputs, at start-up it will assemble a chain of authorizers that will be run for every incoming request. If all authorizers deny the request, the request results in a `Forbidden` response and goes no further down the chain. If a single authorizer approves, the request proceeds.
 
-some authorizers as you might have noticed are dynamic (RBAC and Node) and therefore need to retrieve cluster state. for example, in the case of RBAC, when a request comes in and has been authenticated, it retrieves user information set by the authenticator and looks up to see whether that user has any associated roles which permit them to do what they want to do. accessing roles requires a list operation to be performed against the API server. to solve this problem, kubernetes uses the concept of an informer.
+Some examples of authorizers that ship with v1.8 are:
 
-an informer is a way for external controllers to subscribe to storage events. it provides an abstraction for subscribers to listen out for API server events (creation, update, delete) in a threadsafe manner, without having to worry about stepping on anybody else's toes. it does this by accessing a local cached representation of the resource it's following. This saves us connections against the API server, duplicate serialization costs server-side, duplicate deserialization costs controller-side, and duplicate caching costs controller-side. informers provide convenience methods to list and retrieve specific resources, which is useful in the case of RBAC.
+- `AllowAll` and `DenyAll`, which approve and deny all traffic respectively;
+- webhook, which interacts with an off-cluster HTTP(S) service;
+- ABAC, which enforces policies defined in a static file;
+- RBAC, which enforces RBAC roles which are added by the admin as k8s resources
+- Node, which ensures that node clients, i.e. the kubelet, can only access resources hosted on itself.
+
+### [side point]: accessing state with informers
+
+As you might have noticed, some authorization controllers like RBAC and Node are dynamic, in that they need to retrieve cluster state to function. To return to the example of the RBAC authorizer, we know that when a request comes in, the authenticator will save an initial representation of user state for later use. The RBAC authorizer will then use this to retrieve all the roles and role bindings that are associated with the user in etcd. How are controllers supposed to access and modify such resources? It turns out this is a common use case and is solved in Kubernetes with informers. 
+
+"A what?!" I hear you ask. An informer is a pattern that allows controllers to subscribe to storage events and easily list resources they're interested in. Apart from providing an abstraction which is nice to work with, it also handles a lot of the nuts and bolts such as caching. Caching is important because it reduces unnecessary kube-apiserver connections, and reduces duplicate serialization costs server- and controller-side. By formalising a model like this, it also allows controllers to interact in a threadsafe manner without having to worry about stepping on anybody else's toes. 
+
+In the case of the RBAC authorizor, it will not register any event handlers, but what it will do is use the informer to list over a collection of roles and retrieve a specific resource in a consistent, supported way. Now that we know what informers are and the basics of how they're used, let's leave the rabbit hole and return to our main journey.
 
 ## admission controllers
 
-whilst authorization is focused on answering if a user is authorized to perform an action, admission Control is focused on if the system will accept an authorized action. Kubernetes may choose to dismiss an authorized action based on any number of admission control strategies. **** CHANGE For example, you can have an admission plug-in enforcing all container images to come from a particular registry, and prevent other images from being deployed in pods. There are quite many admission controllers providing functionality such as enforcing limits, applying pre-create checks, and setting up default values for missing fields. ****
+Okay so we've authenticated and been authorized at this point, awesome sauce. So what's left? From kube-apiserver's perspective, it believes who we are and permits us to continue, but with Kubernetes, other parts of the system have strong opinions about what should and should not be permitted to happen. Cue admission controllers.
 
-the next stage of the request lifecycle concerns admission controllers. these are hooks that validate a request at the final stages before it's persisted to etcd. admission controllers are defined through a runtime flag to the apiserver. when a name is provided, the apiserver initiliazes it and adds it to a chain. it then does a union and executes each one when a request comes in. 
+Whilst authorization is focused on answering if a _user_ is authorized to perform an action, admission control is focused on if the wider system will permit the action. They are the last bastion of control before an object is persisted to etcd, so they encapsulate the remaining system checks to ensure an action does not produce unexpected or negative results.
 
-admission controllers are stored as plugins in `plugin/pkg/admission` and are compiled into kubernetes. they have to satisfy a small interface. if the controller performs validation and decides that the incoming request cannot meet its requirement, it returns an error which is caught by the server and rendered into a HTTP response. if a single admission controller fails, the chain is broken and the whole request will fail.
+The way admission controllers are initialized is very similar to authenticator and authorizer chains. To promote extensibility, they are stored as plugins in the `plugin/pkg/admission` directory, made to satisfy a small interface, and are compiled into kubernetes itself. Unlike other control chains we have mentioned, if a single admission controller fails, the whole chain is broken and the request will fail. 
 
-admission controllers are usually categorised into resource management, security, defaulting, and referential consistency. commonly used resource ACs are: `InitialResources` which sets default resource limits to the resources for a container based on past usage; `LimitRanger` which sets defaults for container requests and limits, or enforce upper bounds on certain resources (no more than 2GB of memory, default to 512MB); and `ResourceQuota` which calculates and denies a number of objects (pods, rc, service load balancers) or total consumed resources (cpu, memory, disk) in a namespace.
+Admission controllers are usually categorised into resource management, security, defaulting, and referential consistency. Sometimes an admission controller will permit a request, but reconcile cluster state in accordance with its own policy (the `NamespaceExists` controller will create a namespace for example). Commonly used resource ACs are: 
+
+- `InitialResources` which sets default resource limits to the resources for a container based on past usage; 
+- `LimitRanger` which sets defaults for container requests and limits, or enforce upper bounds on certain resources (no more than 2GB of memory, default to 512MB); 
+- `ResourceQuota` which calculates and denies a number of objects (pods, rc, service load balancers) or total consumed resources (cpu, memory, disk) in a namespace.
 
 ## each object save to etcd
 
-when the apiserver first starts, it maps the REST API and registers handlers for every expected API operation. in our case, kubectl will have converted `kubectl run` to a POST request. since this request matches an expected pattern, when the api server receives the request it will map it to a create handler which is responsible for request validation and interacting with the storage abstraction.
+By this point, Kubernetes has fully vetted the incoming request and has permitted it to go forth and prosper. The next step is how kube-apiserver deserializes the request, constructs resources from them, and persists them to the datastore. Let's break that down a bit.
 
-the create handler will read the request and deserialize the data. before passing this on the storage adapter, it will invoke performance and audit tasks that are used to gain insight into the system. 
+How does kube-apiserver know what to do when it accepts our request? Enter our old friend OpenAPI! As we mentioned earlier, all API operations are formalised into an OpenAPI spec, which lists the path, JSON structures and query parameters. These OpenAPI specs are generated into the `pkg/generated/openapi` package when kubernetes is built. This spec then populates the [apiserver's config](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/config.go#L149). This spec is then iterated over and each API group is [installed](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/genericapiserver.go#L371) into a chain of handlers.
 
-the storage registry then assembles the storage key for the object. this is configurable and is usually done by appending the object's name to the namespace, e.g. `<namespace>/<name>`. it then persists the object to the database and checks for any create errors. it then performs a get to ensure the object was created, then invokes any post-create handlers and decorators if additional finalization is required.
+1. When the kube-apiserver binary is run, it [creates a server chain](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L119), which allows apiserver aggregation
+1. When this happens, a [generic apiserver is created](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L149) that serves as a default implementation. 
+1. The generic server then iterates over all the API groups and configures the [storage provider](https://github.com/kubernetes/kubernetes/blob/c7a1a061c3dc5acabcc0c35b3b96a6935dccf546/pkg/master/master.go#L410)
+1. For every API group it also iterates over each of the group versions and [installs the REST mappings](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/groupversion.go#L92) for each of the group version's routes. 
+1. For our specific use case, a [POST handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/installer.go#L710) is registered, which in turn will delegate to a [create resource handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L37).
+
+After all this is set up, the server is in a position to respond. By the time a request comes in, this is what will happen:
+
+1. If the handler chain can match the request to a set pattern (i.e. to the routes we registered), it will [dispatch the dedicated handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/handler.go#L143) that was registered for the route. Otherwise it will use a [path-based handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L248). If no paths are registered, a [not found handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L254) is invoked.
+1. Luckily for us, we have a registered route called [`createHandler`](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L37)! What does it do? Well it will first decode the HTTP request and perform basic validation, such as ensuring the JSON they provided correlates with our expectation of the versioned API resource.
+1. Auditing and final admission [will occur](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L93-L104). 
+1. The resource will be [saved to etcd](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L111) by [delegating to the storage provider](https://github.com/kubernetes/apiserver/blob/19667a1afc13cc13930c40a20f2c12bbdcaaa246/pkg/registry/generic/registry/store.go#L327). Usually the etcd key will be the form of `<namespace>/<name>`, but this is configurable.
+1. Any create errors are caught and finally the storage provider performs a get to ensure the object was created, then invokes any post-create handlers and decorators if additional finalization is required.
+1. The HTTP response [is constructed](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L131-L142) and sent back
 
 ## initializers
 
