@@ -129,91 +129,89 @@ one question which you might have asked is, how can a userland controller proces
 
 ## deployment controller creates replicasets
 
-after a deployment record is stored to etcd, it is detected by the deployment controller whose job it is to listen out for changes to deployment records (adds, updates and deletes). it aims to reconcile state by synchronizing deployments with their respective pods and replica sets throughout the system. 
+By this stage, our Deployment record exists in etcd and any initialization logic has completed. But when we think about it, a Deployment is really just a collection of ReplicaSets, each of which are a set of Pods. How does Kubernetes go about creating this topology from one HTTP request? This is where Kubernetes built-in controllers enter the stage.
 
-a collection of pods make up a replica set (defined by a replica count), and replica sets make up a deployment. when a rollout to a new container image, or a scale operation, occurs, a new replica set is created.
+Kubernetes makes strong use of "controllers", which are scripts that run in the background to reconcile the actual state of the system to the desired state. Each controller has a small responsibility and is run in parallel by kube-controller-manager component. So let's introduce the first controller of our journey, the Deployment controller.
 
-to return to our create operation: at this point in time, there exists a Deployment object in the datastore, but no associated replica sets or pods. the deployment controller now starts the process of synchronization.
+After a deployment record is stored to etcd and initialized, it is made visible via kube-apiserver. When this new resource is available, it is detected by the Deployment controller, whose job it is to listen out for changes to deployment records. In our case, the controller registers a specific callback for create events via an informer. 
 
-when the controller starts, it users informers to inform it of certain events, firing off specific functions for each event type. when a deployment is added, it's added to an internal work queue and a sync method is called. 
+This handler will be executed when our Deployment first becomes available and will add it to an internal work queue. By the time it gets around to processing our record, the controller will inspect our Deployment and realise that there are no ReplicaSet or Pod records associated with it. It does this by querying kube-apiserver with label selectors.
 
-it will first list all replica sets and pods that match the deployments label selector, and no will be returned. it will then begin rolling out its first replica set by creating the resource, assigning it its label selector, and giving it the revision number of 1. its PodSpec is copied from the Deployment's manifest, as well as other metadata including replica set. sometimes the deployment record will need to be updated after this too (for instance if the progress deadline is set).
+After realising none exist, it will begin a synchronization process to start resolving state. It does this by rolling out (e.g. creating) a ReplicaSet resource, assigning it a label selector, and giving it the revision number of 1. The ReplicaSet's PodSpec is copied from the Deployment's manifest, as well as other relevant metadata. Sometimes the Deployment record will need to be updated after this as well (for instance if the progress deadline is set). 
 
-updates status.
-
-once this task finishes, it enters a wait loop waiting for the deployment to become complete. this is the job of the next controller and happens once all of its desired replicas are updated and available, and no old pods are running. 
-
-once this wait loop finishes, it will perform a cleanup, which usually involves deleting any old replica sets that exceed the revision history limit for a given deployment (by default this is disabled).
+The status is then updated and it then enters a loop waiting for the deployment to complete. Since the Deployment controller is only concerned about creating ReplicaSets, reconcilation needs to be continued by the next controller, called ReplicaSet controller (whose job is to create Pods). 
 
 ## replicaset controller creates pods
 
-the next steps is the replicaset controller which is responsible for monitoring the lifecycle of replicasets and their dependent resources (pods), and acting appropriately on key events. so far, kubectl has sent a Deployment resource to the apiserver, and the deployments controller has created a new replicaset resource with the appropriate owner reference.
+What other controllers come into play when using `kubectl run`? In the previous step, the Deployments controller created our Deployment's first ReplicaSet but we still have no Pods. This is where the ReplicaSet controller comes into play! Its job is to monitor the lifecycle of ReplicaSets and their dependent resources (Pods). Like most other controllers, it does this by triggering handlers on certain events.
 
-when a new replicaset is created, the RS controller inspects the desired state and realizes there is a skew between what exists and what is required. it then seeks to reconcile this state by bumping the number of pods that belong to the replica set. it starts creating them in a careful manner, ensuring that a burst count is always matched. 
+The event we're interested in is creation. When a ReplicaSet is created (courtesy of the Deployments controller) the RS controller inspects the desired state and realizes there is a skew between what exists and what is required. It then seeks to reconcile this state by bumping the number of pods that belong to the replica set. It starts creating them in a careful manner, ensuring that the ReplicaSet's burst count (which it inherited from its parent Deployment) is always matched. 
 
-the create operations is also batched, meaning that the batch sizes start at SlowStartInitialBatchSize and doubles with each successful iteration in a kind of "slow start". this aims to mitigate the risk of numerous pod bootup failures (due to quotas) that could end up placing unnecessary load on the API server. 
+Create operations for Pods are also batched, starting with `SlowStartInitialBatchSize` and doubling with each successful iteration in a kind of "slow start" operation. This aims to mitigate the risk of swamping kube-apiserver with unnecessary HTTP requests when there are numerous pod bootup failures (for example, due to resource quotas). If we're going to fail, we might as well fail gracefully with minimal impact on other system components! 
 
-owner references. not only does this ensure that child resources are garbage-collected once a resource managed by the controller is deleted (cascading deletion), it also provides an effective way for parent resources to not fight over their children. having a stateful representation of dependencies allows controller restarts to not affect the state of the system. this enforces a policy of isolation where controllers do not operate on resources they don't explicitly own, nor should it count these resources towards how it reconciles state. in other words, controllers are designed so that they're responsible (only take ownership of their own resources), non-interfering, and non-sharing. 
+As we've hinted at before, Kubernetes enforces object hierarchies through Owner References (a field in the child resource where it references the ID of its parent). Not only does this ensure that child resources are garbage-collected once a resource managed by the controller is deleted (cascading deletion), it also provides an effective way for parent resources to not fight over their children (imagine the scenario where two potential parents think they own the same child!). 
 
-sometimes, orphaned resources (i.e. those which were not created by the controller but having matching label selectors) are adopted by an owner resource if no ControllerRef already exists for it. multiple parents can race to adopt a child, but only one will be successful (the others will receive a validation error). orphans arise when their parents are deleted, but garbage collection policies prohibit child deletion.
+Another subtle benefit of the Owner Reference design is that it's stateful: if any controller were to restart, that downtime would not affect the wider system since resource topology is independent of the controller's lifecycle. This focus on isolation also creeps in to the design of controllers themselves: they should not operate on resources they don't explicitly own. Controllers should instead be selective in its ownership assertions, non-interfering, and non-sharing. 
 
-updates the status and also sets the ObservedGeneration, so that clients know the controller has processed the resource successfully.
+Anyway, back to owner references! Sometimes there are "orphaned" resources in the system which usually happens when:
+
+1. a parent is deleted but not its children
+2. garbage collection policies prohibit child deletion
+
+When this occurs, controllers will ensure that orphans are adopted by a new parent. Multiple parents can race to adopt a child, but only one will be successful (the others will receive a validation error). 
 
 ## scheduler assigns node
 
-The scheduler runs is a controller than runs as part of the control panel among other master components. like all other controllers, it listens out for events and attempts to reconcile state. in this case, it listens out for pods with an empty PodSpec.NodeName and attempts to find a suitable Node that the pod can reside on. 
+By this point we have a Deployment, a ReplicaSet and three Pods. Our pods, however, are stuck in a `Pending` state because they have not yet been scheduled to a Node. The final controller that accomplishes this is the scheduler 
 
-in order to find a suitable pod, a specific scheduling algorithm is used. the default scheduler registers predicates that are run against all Schedulable Nodes in the system and filters out those which are inappropriate for the workload. for example, if the PodSpec explicitly requests CPU or RAM resources, and a Node cannot meet these requests due to lack of capacity, it will be deselected. rsource capacity is calculated as the total capacity minus the sum of the resource requests of currently running containers.
+The scheduler runs as a standalone component of the control plane and operates in the same way as other controllers: it listens out for events and attempts to reconcile state. In this case, it listens out for pods with an empty `NodeName` field in their PodSpec and attempts to find a suitable Node that the pod can reside on. 
 
-once appropriate nodes have been selected, a series of priority functions are run against the remaining nodes in order to rank them according to suitability. for example, in order to spread workloads across the system, it will favour nodes with less resources (i.e. containers with resource requests. as it runs these functions, it assigns each node a numerical rank. the highest ranked node is then selected for scheduling.
+In order to find a suitable pod, a specific scheduling algorithm is used. The way the default scheduling algorithm works is the following:
 
-both predicate and priority functions are extensible and can be defined by using the `--policy-config-file` flag. this introduces a degree of flexibility into the default scheduler. administrators can also run custom schedulers (controllers with custom processing logic) as Deployments. if a PodSpec contains `schedulerName`, Kubernetes will hand over scheduling for that pod to whatever scheduler thas has registered itself under that name.
+1. when the scheduler starts, a chain of predicates are registered. These predicates are like functions that, when evaluated, determine the suitability of a Node to host a pod. For example, if the PodSpec explicitly requests CPU or RAM resources, and a Node cannot meet these requests due to lack of capacity, it will be deselected for the Pod (resource capacity is calculated as the _total capacity_ minus the _sum of the resource requests_ of currently running containers).
+
+1. once appropriate nodes have been selected, a series of priority functions are run against the remaining Nodes in order to rank their suitability. For example, in order to spread workloads across the system, it will favour nodes that have fewer resource requests than others (since this indicates less workloads running). As it runs these functions, it assigns each node a numerical rank. The highest ranked node is then selected for scheduling.
 
 once the algorithm finds a node, the scheduler then creates a Binding API object whose Name and UID match the Pod, and whose ObjectReference field contains the name of the selected node. this is then POSTed to the apiserver.
 
 when the apiserver receives this Binding object, the registry deserializes the object and updates the following fields on the Pod object: it sets the NodeName to the one in the ObjectReference, it adds any relevant annotations, and sets its `PodScheduled` status condition to `True`.
 
+**Customising the scheduler:** what's interesting is that both predicate and priority functions are extensible and can be defined by using the `--policy-config-file` flag. This introduces a degree of flexibility. Administrators can also run custom schedulers (controllers with custom processing logic) in standalone Deployments. If a PodSpec contains `schedulerName`, Kubernetes will hand over scheduling for that pod to whatever scheduler thas has registered itself under that name.
+
 ## kubelet begins pod sync
 
-the next step is handled by the kubelet, which is an agent that runs on every node marked for handling workloads. the kubelet agent is responsible for listening out for new Pod manifests and deploying them as containers on the instance it's running on. it does this by checking the apiserver HTTP API every 20 seconds (this is configurable) for unscheduled pods whose NodeName matches the node the kubelet is running on.
+Okay, the main controller loop has finished, phew! Let's summarise: the HTTP request passed authentication, authorization, and admission control stages; a Deployment, ReplicaSet, and three Pod resources were persisted to etcd; a series of initializers ran; and each Pod was scheduled to a suitable node. So far, however, the state we've been talking about is purely in etcd. The next steps involve distributing state to worker nodes. The way this happens in Kubernetes is through a component called the kubelet. Let's begin!
 
-the kubelet pulls all of the relevant pods (i.e. those with the correct NodeName) from the server, and does a quick comparison to see if the current state is new. it then adds all update events to a sync channel and depending on the type of operation (add, update, delete) fires off the correct handler. then `syncPod` is called, which does the following:
+The kubelet is an agent that runs on every node in a Kubernetes cluster and is responsible for the lifecycle of a Pod. This means it handles all of the translation logic between the abstraction of a "Pod" (which is just a Kubernetes concept) and container (the building blocks of a Pod). It also handles mounting volumes, container logging, garbage collection, and many more important things.
 
-the kubelet will now begin to start our pod! however it doesn't really have a concept of "start this pod", all it knows about is syncing the real state of affairs with a desired state. with this in mind, it defines a [`syncPod`](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet.go#L1481) method that performs the following:
+A useful way of thinking about the kubelet is again like a controller! It queries Pods from kube-apiserver every 20 seconds (this is configurable), for unscheduled pods whose `NodeName` matches the node the kubelet is running on. Once it has that list, it detects new additions by comparing against its own internal cache and begins to synchronise state if any discrepencies exist. 
 
-- if the pod is being created (ours is!), it registers some startup metrics
+What's interesting, however, is that the kubelet doesn't have a concept of "starting" a Pod, since as we've already mentioned, Pods aren't actually concrete things. Instead, it handles [synchronization](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet.go#L1481) in the following way:
 
-- generates a [PodStatus]() API object, which is responsible for indicating the state of a pod through its `phase`. The phase of a Pod is a simple, high-level summary of where the Pod is in its lifecycle. Examples include `Pending`, `Running`, `Succeeded`, `Failed` and `Unknown`. 
-
-    - when the PodStatus is generated, what's interesting is that a chain of PodSyncHandlers is called on the Pod. If any of them decide that the Pod no longer belongs there, the Pod's phase will change to v1.PodFailed and it will be evicted from the Node.
-
-    - the Pod Phase is determined by the status of its init and real containers. Since our containers have not been started yet, the containers are classed as [waiting](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet_pods.go#L1244). Any pod with a waiting container is considered [Pending](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet_pods.go#L1258-L1261), which is the case in our situation!
-
-    - the Pod condition is also dictated by the condition of its containers. Since none of our containers have been created by the runtime yet, it will set the PodReady condition to False](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/status/generate.go#L70-L81).
-
-- It will then send this PodStatus to the kubelet's status manager, which will asynchronously update the etcd record via the apiserver 
-
-- a series of admit handlers are run to ensure the pod is allowed to be run. Handlers include AppArmor and enforcing `NO_NEW_PRIVS`. Pods denied at this stage will stay in the `Pending` state indefinitely.
-
-- if the `cgroups-per-qos` flag has been provided, kubelet will create cgroups for the pod and apply resource parameters. This is to enable better Quality of Service (QoS) handling for pods.
-
-- data directories are created for the pod. These include the pod dir (usually `/var/run/kubelet/pods/<podID>`), its volumes dir (`<podDir>/volumes`) and its plugins dir (`<podDir>/plugins`).
-
-- the volume manager will attach and wait for any relevant volumes defined in Pod.Spec.Volumes. Depending on the type of volume being mounted, some pods will need to wait longer (e.g. cloud or NFS volumes).
-
-- all secrets defined in `Pod.Spec.ImagePullSecrets` are retrieved from the apiserver
-
-- the container runtime then runs the container (described in more detail next)
-
-this syncPod callback will be invoked every XXX seconds
+1. if the pod is being created (ours is!), it [registers some startup metrics](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet.go#L1519) that is used in Prometheus for tracking pod latency.
+1. [generates a PodStatus](https://github.com/kubernetes/kubernetes/blob/dd9981d038012c120525c9e6df98b3beb3ef19e1/pkg/kubelet/kubelet_pods.go#L1287) API object, which represents the state of a Pod's current Phase. The Phase of a Pod is a high-level summary of where the Pod is in its lifecycle. Examples include `Pending`, `Running`, `Succeeded`, `Failed` and `Unknown`. Generating this state is quite complicated, so let's dive into exactly what happens:
+    - first, a chain of `PodSyncHandlers` is executed sequentially. Each handler checks whether the Pod should still reside on the node. If any of them decide that the Pod no longer belongs there, the Pod's phase [will change](https://github.com/kubernetes/kubernetes/blob/dd9981d038012c120525c9e6df98b3beb3ef19e1/pkg/kubelet/kubelet_pods.go#L1293-L1297) to `PodFailed` and it will eventually be evicted from the Node. Examples of these include evicting a Pod after its `activeDeadlineSeconds` has exceeded (used during Jobs).
+    - next, the Pod's Phase is determined by the status of its init and real containers. Since our containers have not been started yet, the containers are classed as [waiting](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet_pods.go#L1244). Any pod with a waiting container is considered [Pending](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet_pods.go#L1258-L1261), which is the case in our situation.
+    - finally, the Pod condition is determined by the condition of its containers. Since none of our containers have been created by the container runtime yet, it will [set the `PodReady` condition to False](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/status/generate.go#L70-L81).
+1. After the PodStatus is generated, it will then be sent to the Pod's status manager, which is tasked with asynchronously updating the etcd record via the apiserver.
+1. Next, a series of admission handlers are run to ensure the pod has the correct security permissions to run. These include enforcing [AppArmor profiles and `NO_NEW_PRIVS`](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet.go#L883-L884). Pods denied at this stage will stay in the `Pending` state indefinitely.
+1. If the `cgroups-per-qos` runtime flag has been specified, the kubelet will create cgroups for the pod and apply resource parameters. This is to enable better Quality of Service (QoS) handling for pods.
+1. Data directories [are created for the pod](https://github.com/kubernetes/kubernetes/blob/dd9981d038012c120525c9e6df98b3beb3ef19e1/pkg/kubelet/kubelet_pods.go#L772). These include the pod dir (usually `/var/run/kubelet/pods/<podID>`), its volumes dir (`<podDir>/volumes`) and its plugins dir (`<podDir>/plugins`).
+1. The volume manager will [attach and wait](https://github.com/kubernetes/kubernetes/blob/2723e06a251a4ec3ef241397217e73fa782b0b98/pkg/kubelet/volumemanager/volume_manager.go#L330) for any relevant volumes defined in `Spec.Volumes`. Depending on the type of volume being mounted, some pods will need to wait longer (e.g. cloud or NFS volumes).
+1. All secrets defined in `Spec.ImagePullSecrets` are [retrieved from the apiserver](https://github.com/kubernetes/kubernetes/blob/dd9981d038012c120525c9e6df98b3beb3ef19e1/pkg/kubelet/kubelet_pods.go#L788) so that they can later be injected into the container.
+1. The container runtime then runs the container (described in more detail next)
 
 ## CRI and pause containers
 
-the software responsible for starting and stopping containers is called the container runtime. in an effort to be more extensible, since 1.5 the kubelet has been using a plugin interface called CRI (Container Runtime Interface) to interact with container runtimes. CRI provides an abstracted interface between the kubelet and a specific container runtime, allowing them to communicate via protocol buffers and a gRPC API. the net benenit of using such an abstraction is a clean contract between kubelet and a runtime, allowing new compliant runtimes to be added with minimal overhead, since implementations are no longer tightly coupled.
+We're at the point now where most of the set-up is done and the container is ready to be launched. This is step is similar to doing `docker run`, except it's handled by the kubelet in a much more abstracted way. The software that deploys the container itself is called the container runtime (`docker` or `rkt` are examples).
 
-when a pod is first started, kubelet invokes the `RunPodSandbox` RPC. a "sandbox" is a CRI term to describe a set of containers, which in Kubernetes parlance is a pod. for hypervisor-based runtimes, a sandbox might represent a VM. for the docker service, creating a sandbox involves creating a "pause" container which acts as the "parent container" for all other containers in a pod. it does so by hosting the namespaces that other containers will join (IPC, network, PID) and serving as PID 1 for each pod, allowing it to reap zombie containers. having a dedicated container allows for more efficient and reliable process reaping. 
+In an effort to be more extensible, since Kubernetes 1.5 the kubelet has been using the Container Runtime Interface (CRI) for interacting with concrete container runtimes. CRI provides an intermediary abstraction between the kubelet and a specific runtime implementation, allowing them to communicate via [protocol buffers](https://github.com/google/protobuf) (it's like an efficient JSON) and a [gRPC API](https://grpc.io/) (a type of API well-suited to performing Kubernetes operations). By using a defined contract between kubelet and runtime, the implementation details become largely irrelevant because all that matters is the contract. This allows new runtimes to be added with minimal overhead since no core Kubernetes code needs to change, which is pretty cool!
 
-after the pause container has been created, checkpointed to disk, and started.
+Let's get back to it... When a pod is first started, kubelet invokes the `RunPodSandbox` remote procedure command (RPC). A "sandbox" is a CRI term to describe a set of containers, which in Kubernetes parlance is a pod. The term is deliberately loose so it doesn't lose meaning for other runtimes that may not use containers (such as with hypervisor-based runtimes, where a sandbox might represent a VM). 
+
+In our case, we're using Docker. In this runtime, creating a sandbox involves creating a "pause" container which. A pause container is pretty much like a parent container, since it hosts a lot of the pod-level resources that workload containers will end up using. Examples of these "resources" are Linux namespaces (IPC, network, PID). If you're not familiar with how containers work in Linux, let's take a quick refresher. The Linux kernel has the concept of a namespace which allows the system to carve out a dedicated set of resources (CPU or memory for example) and offer it to a process as if it's the only thing in the world using them. Cgroups is the way in which Linux governs resource allocation (it's kinda like the cop that polices things). Docker uses both of these Kernel features to host a process that has guaranteed resources and enforced isolation. For more information, check out [What even is a Container](https://jvns.ca/blog/2016/10/10/what-even-is-a-container/). 
+
+The pause container provides a way to host all of these namespaces and allow sibling containers to share them. The _second_ role of a pause container is related to how PID namespaces work. In these types of namespaces, processes form a hierarchical tree and the "init" process at the top takes responsibility for "reaping" dead processes. For more information on how this work, check out this [blog post](https://www.ianlewis.org/en/almighty-pause-container). After the pause container has been created, it is checkpointed to disk, and started.
 
 ## CNI and pod networking
 
