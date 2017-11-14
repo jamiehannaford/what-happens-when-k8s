@@ -12,25 +12,25 @@ One of the beautiful things about Kubernetes is that it offers tremendous power 
 
 This is a living document. Contributions that add, edit, or delete content where necessary is definitely welcome!
 
-## api version reconciliation
+## api reconciliation
 
-The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will always fail (e.g. creating a non-supported or outdated resource) will not be sent to kube-apiserver, thereby saving precious bandwidth and CPU cycles. 
+The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will always fail (e.g. creating a non-supported or outdated resource) will not be sent to kube-apiserver. Examples of failed requests could be creating a non-supported resource type, or using a [malformed image name](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L163).
 
-To do this, kubectl uses the official kubernetes [client]() to discover all the potential [API groups]() for a given HTTP endpoint. The API server represents its RESTful state using OpenAPI (previously Swagger) documents, so these are retrieved and persisted to disk in the `~/.kube/schema` directory. It then retrieves all supported versions for those groups and saves to `~`. Now that it has a cached representation of the API contract, kubectl can perform validation. 
+After validation, kubectl then begins assembling the request it'll send to kube-apiserver. To do this it uses entities called "generators" to generate a Resource object and then serialize it into JSON. 
 
-However, we need to hold our horses because `kubectl run` acts a bit differently. Most commands (like `kubectl create`) to kubectl reference some kind of YAML or JSON file which, to kubectl's perspective, has the potential to contain malformed or just plain wrong data structures. The run command on the other hand collects input through CLI flags, so kubectl has full control over how to use and serialize that data - so it doesn't need to perform schema validations. 
+What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L231-L257) the resource type if the generator name wasn't explicitly specified (using the `--generator` flag). For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered pods. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (`--dry-run`). 
 
-## kubectl generates objects
+After realising that we want to create a Deployment, it will use the generator called `DeploymentV1Beta1` to generate a [runtime object](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/run.go#L59) from our provided parameters. It then uses this runtime object to [find the appropriate API group and version](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L580-L597) for our Deployment (which are `extensions` and `v1beta1` respectively), and then [assembles a versioned client](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L598) that is aware of the various REST semantics for the HTTP operation. 
 
-After the "validation" stage, kubectl then begins assembling the request it'll send to kube-apiserver. To do this it uses a concept called [generators]() to generate a Resource object and then serialize it into JSON. 
+But how is kubectl aware of every possible API group? kubectl is pretty smart because it uses a "discovery" process to do this. Since kube-apiserver represents its REST schema using OpenAPI using the `/apis` path, kubectl can just retrieve this JSON document and use it to learn about what the API looks like. It also [caches the OpenAPI to disk](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/cmd/util/factory_client_access.go#L117) in the `~/.kube/schema` directory to improve performance (if you want to see this API discovery try turning on the `-v` flag to the maximum!).
 
-What you might not realise is that in the run command you can actually deploy multiple resource types, not just deployments. To make that happen, kubectl will try to infer what type of resource to run if it wasn't explicitly specified with the `--generator` flag. For example, resources that have `--restart-policy=Always` are considered Deployments, those with `--restart-policy=Never` are considered pods. Another part of this inference stage is figuring out whether other actions need to be triggered: for example to record the command (for rollouts or auditing), or whether this command is just a dry run (`--dry-run`). 
-
-The final step is to construct a versioned client that maps with the OpenAPI spec for the specific API group, and then delegate request lifecycle events to the client, such as sending HTTP request and parsing the response from the kube-apiserver.
+The final step is to perform the [HTTP request](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L628), since we did not register it as a dry-run. kubectl will then print out a success message [based on the desired output format](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L403-L407).
 
 ## client auth
 
-In order to send the request successfully, however, the client needs to be able to authenticate. User credentials are almost always stored in the `kubeconfig` file which resides on disk. kubectl will try to auto-detect the correct path to the file by doing the following:
+One thing that we neglected to mention is client authentication, so let's look at that now.
+
+In order to send the request successfully, the client needs to be able to authenticate. User credentials are almost always stored in the `kubeconfig` file which resides on disk. kubectl will try to auto-detect the correct path to the file by doing the following:
 
 - if `--kubeconfig` flag is provided, easy peasy, use that.
 - if the `$KUBECONFIG` environment variable is defined, use that.
@@ -211,17 +211,13 @@ Let's get back to it... When a pod is first started, kubelet invokes the `RunPod
 
 In our case, we're using Docker. In this runtime, creating a sandbox involves creating a "pause" container which. A pause container is pretty much like a parent container, since it hosts a lot of the pod-level resources that workload containers will end up using. Examples of these "resources" are Linux namespaces (IPC, network, PID). If you're not familiar with how containers work in Linux, let's take a quick refresher. The Linux kernel has the concept of a namespace which allows the system to carve out a dedicated set of resources (CPU or memory for example) and offer it to a process as if it's the only thing in the world using them. Cgroups is the way in which Linux governs resource allocation (it's kinda like the cop that polices things). Docker uses both of these Kernel features to host a process that has guaranteed resources and enforced isolation. For more information, check out [What even is a Container](https://jvns.ca/blog/2016/10/10/what-even-is-a-container/). 
 
-The pause container provides a way to host all of these namespaces and allow sibling containers to share them. The _second_ role of a pause container is related to how PID namespaces work. In these types of namespaces, processes form a hierarchical tree and the "init" process at the top takes responsibility for "reaping" dead processes. For more information on how this work, check out this [blog post](https://www.ianlewis.org/en/almighty-pause-container). After the pause container has been created, it is checkpointed to disk, and started.
+The pause container provides a way to host all of these namespaces and allow sibling containers to share them. By being a part of the same network namespace, one end-user benefit we see is that containers in a pod can refer to one another using `localhost`. The _second_ role of a pause container is related to how PID namespaces work. In these types of namespaces, processes form a hierarchical tree and the "init" process at the top takes responsibility for "reaping" dead processes. For more information on how this work, check out this [blog post](https://www.ianlewis.org/en/almighty-pause-container). After the pause container has been created, it is checkpointed to disk, and started.
 
 ## CNI and pod networking
 
-when the kubelet sets up networking, it delegates this task to a CNI plugin. CNI stands for container network interface and is an abstraction that allows different network providers to set up networking and communicate back to the kubelet in a standardised way. CNI works by piping JSON configuration to a CNI binary that is usually tasked with a specific responsibility. 
+Our pod now has its bare bones: a pause container which hosts all of the namespaces to allow inter-pod communication. But how does networking work and how is it set up? 
 
-> A CNI plugin is responsible for inserting a network interface into the container network namespace (e.g. one end of a veth pair) and making any necessary changes on the host (e.g. attaching the other end of the veth into a bridge). It should then assign the IP to the interface and setup the routes consistent with the IP Address Management section by invoking appropriate IPAM plugin.
-
-for the ADD command, the container ID is passed to the ID, along with the path to the network NS file, the interface name to set up inside the container, the path to the CNI binary, and any additional networking information, such as which DNS nameservers to use. kubelet will pass in the cluster's internal DNS server's IP address, which will ensure that the container's `resolv.conf` file is set appropriately. a list of CNI plugins (also defined in the JSON) will then by run in order.
-
-kubelet relies on `--cni-conf-dir` to find the CNI configuration. it will then find the first configuration file in that directory, and send it to the appropriate plugin binary. for example:
+When the kubelet sets up networking for a pod it delegates the task to a "CNI" plugin. CNI stands for Container Network Interface and operates in a similar way to the Container Runtime Interface. In a nutshell, CNI is an abstraction that allows different network providers to use different networking implementations for containers. Plugins are registered and the kubelet interacts with them by streaming JSON data (config files are located in `/etc/cni/net.d`) to the relevant CNI binary (located in `/opt/cni/bin`) via stdin. This is an example of the JSON configuration:
 
 ```yaml
 {
@@ -241,20 +237,34 @@ kubelet relies on `--cni-conf-dir` to find the CNI configuration. it will then f
 }
 ```
 
-will set up a local Linux bridge on the host. With bridge plugin, all containers (on the same host) are plugged into a bridge (virtual switch) that resides in the host network namespace. The containers receive one end of the veth pair with the other end connected to the bridge. An IP address is only assigned to one end of the veth pair -- one residing in the container. The bridge itself can also be assigned an IP address, turning it into a gateway for the containers. Alternatively, the bridge can function purely in L2 mode and would need to be bridged to the host network interface (if other than container-to-container communication on the same host is desired). The network configuration specifies the name of the bridge to be used. If the bridge is missing, the plugin will create one on first use and, if gateway mode is used, assign it an IP that was returned by IPAM plugin via the gateway field.
+It also specifies additional metadata for pod, such as its name and namespace via the `CNI_ARGS` environment variable.
 
-IP allocation is handled by a IPAM plugins, which are invoked by the CNI plugin according to the configuration. similar to main plugins, IPAM ones are invoked via an executable have a standardised interface. The IPAM plugin must determine the interface IP/subnet, Gateway and Routes and return this information to the "main" plugin to apply. host-local IPAM plugin allocates ip addresses out of a set of address ranges. It stores the state locally on the host filesystem, therefore ensuring uniqueness of IP addresses on a single host.
+What happens next is dependent on the CNI plugin, but let's look at the `bridge` CNI plugin:
 
-so after this process, the networking for the pause container is set up: it's been allocated a unique IP from a global pod subnet, routes have been set up inside, veth interfaces have been created, and a linux bridge on the host. 
+1. The plugin will first set up a local Linux bridge in the root network namespace to serve all containers on that host
+1. It will then insert an interface (one end of a veth pair) into the pause container's network namespace and attach the other end connected to the bridge. The best way to think about a veth pair is like a tube: one side is connected to the container and the other side is in the root network namespace, allowing packets to travel inbetween. 
+1. It should then assign an IP to the pause container's interface and set up the routes. This will result in the Pod having its own IP address. IP assignment is delegated to the IPAM providers specified to the JSON configuration. 
+    - IPAM plugins are similar to main network plugins: they are invoked via a binary and have a standardised interface. Each must determine the IP/subnet of the container's interface, along with the gateway and routes, and return this information back to the main plugin. The most common IPAM plugin is called `host-local` and allocates IP addresses out of a predefined set of address ranges. It stores the state locally on the host filesystem, therefore ensuring uniqueness of IP addresses on a single host.
+1. For DNS, the kubelet will specify the internal DNS server IP address to the CNI plugin, which will ensure that the container's `resolv.conf` file is set appropriately. 
 
-it is also possible to use overlay networking to dynamically connect host. Flannel, for example, is responsible for providing a layer 3 IPv4 network between multiple nodes in a cluster. Flannel does not control how containers are networked to the host, only how the traffic is transported between hosts. However, flannel does provide a CNI plugin for Kubernetes and a guidance on integrating with Docker. 
+Once the process is complete, the plugin will return JSON data back to the kubelet indicating the result of the operation. 
+
+### Inter-host networking
+
+So far we've described how containers connect to the host, but how do hosts communicate? This will obviously happen if two Pods on different machines want to communicate? 
+
+This is usually accomplished using a concept called overlay networking, which is a way to dynamically sychronize routes across multiple hosts. One populate overlay network provide is Flannel. When installed, its core responsible is to provide a layer-3 IPv4 network between multiple nodes in a cluster. Flannel does not control how containers are networked to the host (this is the job of CNI remember), but rather how the traffic is transported _between_ hosts. To do this, it selects a subnet for the host and registers it with etcd. It then keeps a local representation of the cluster routes and encapsulates outgoing packets in UDP datagrams, ensuring it reaches the right host. For more information, check out [CoreOS's documentation](https://github.com/coreos/flannel).
 
 ## containers are started
 
-once the sandbox has finished initializing and is active, the kubelet can begin ceating individual containers for it. it first starts any init containers, then start the main containers themselves. the process for doing this is: 
+Okay, phew. All the networking shenanigans are done and out of the way. What's left? Well we need to actually start out workload containers. 
 
-1. pull the image, 
-1. create the container. It does this by populating a `ContainerConfig` struct (command, image, labels, mounts, devices, environment variables etc.) with the PodSpec and then sending that with protobufs to the container runtime. For Docker, it deserializes the payload and populates its own config structures to send to the Daemon API. In the process it applies a few metadata labels (container type, log path, sandbox ID).
-1. (alpha feature) register container with CPU manager, which is a new feature in 1.8 that assigns containers to sets of CPUs on the local node by using the `UpdateContainerResources` CRI method
-1. start the container, 
-1. if post-start container lifecycle hooks are registered, run them. Hooks can either be of the type `Exec` (executes a specific command inside the container) or `HTTP` (performs a HTTP request against a container endpoint). If the PostStart hook takes too long to run, hangs, or fails, the container will never reach a `running` state.
+Once the sandbox has finished initializing and is active, the kubelet can begin creating containers for it. It first starts any init containers as defined in the PodSpec, and will then start the main containers themselves. The process for doing is this: 
+
+1. Pull the image for the container. Any secrets that are defined in the PodSpec are used for private registries.
+1. Create the container via CRI. It does this by populating a `ContainerConfig` struct (in which the command, image, labels, mounts, devices, environment variables etc. are defined) from the parent PodSpec and then sending that via protobufs to the CRI plugin. For Docker, it deserializes the payload and populates its own config structures to send to the Daemon API. In the process it applies a few metadata labels (such container type, log path, sandbox ID) to the container.
+1. It then registers the container with CPU manager, which is a new alpha feature in 1.8 that assigns containers to sets of CPUs on the local node by using the `UpdateContainerResources` CRI method.
+1. The container is then started.
+1. If any post-start container lifecycle hooks are registered, they are run. Hooks can either be of the type `Exec` (executes a specific command inside the container) or `HTTP` (performs a HTTP request against a container endpoint). If the PostStart hook takes too long to run, hangs, or fails, the container will never reach a `running` state.
+
+After all this, we should have 3 containers running on one or more worker nodes. All of the networking, volumes and secrets have been populated by the kubelet and made into containers via the CRI plugin. 
