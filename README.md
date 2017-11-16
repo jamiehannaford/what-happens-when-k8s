@@ -1,40 +1,73 @@
-# What happens when ... Kubernetes
+# What happens when ... Kubernetes edition!
 
-Imagine I want to quickly run provision nginx in a Kubernetes cluster. I'd probably type something like this in my terminal:
+Imagine I want to deploy nginx to a Kubernetes cluster. I'd probably type something like this in my terminal:
 
 ```bash
-kubectl run --image=nginx --replicas=3 --port=80 --expose
+kubectl run --image=nginx --replicas=3
 ```
 
-and hit enter. After a few seconds, when I run `kubectl get pods`, I should see three nginx pods spread across all my worker nodes. It works like magic, and that's great! But what's _really_ happening beneath the hood?
+and hit enter. After a few seconds, I should see three nginx pods spread across all my worker nodes. It works like magic, and that's great! But what's really going on under the hood?
 
-One of the awesome things about Kubernetes is that it handles the deployment of workloads across infrastructure through user-friendly APIs. Complexity is hidden by simple abstraction. But in order to fully understand the value it offers us, it's also useful to know about its internals. 
+One of the awesome things about Kubernetes is that it handles the deployment of workloads across infrastructure through user-friendly APIs. Complexity is hidden by simple abstraction. But in order to fully understand the value it offers us, it's also useful to understand its internals. This guide will lead you through the full lifecycle of a request from the client to the kubelet, linking off to the source code where necessary to illustrate what's going on.
 
 This is a living document. If you spot areas that can be improved or rewritten, contributions are welcome!
 
-## api reconciliation
+## contents
+
+1. [kubectl](#kubectl)
+   - [validation and generators](#validation-and-generators)
+   - [API groups and version negotiation](#api-groups-and-version-negotiation)
+   - [client-side auth](#client-side-auth)
+1. [kube-apiserver](#kube-apiserver)
+   - [authentication](#authentication)
+   - [authorization](#authorization)
+   - [admission control](#admission-control)
+1. [etcd](#etcd)
+1. [initializers](#initializers)
+1. [control loops](#control-loops)
+   - [deployments controller](#deployments-controller)
+   - [replicasets controller](#replicasets-controller)
+   - [informers](#informers)
+   - [scheduler](#scheduler)
+1. [kubelet](#kubelet)
+   - [pod sync](#pod-sync)
+   - [CRI and pause containers](#cri-and-pause-containers)
+   - [CNI and pod networking](#cni-and-pod-networking)
+   - [inter-host networking](#inter-host-networking)
+   - [container startup](#container-startup)
+1. [wrap-up](#wrap-up)
+
+## kubectl
+
+### Validation and generators
 
 Okay, so let's begin. We've just hit enter in our terminal. What now?
 
-The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will always fail (e.g. creating a non-supported or outdated resource) will not be sent to kube-apiserver. If I, for example, provided a [malformed image name](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L163) in the command, I'd fail fast.
+The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will _always_ fail (e.g. creating a non-supported resource or using a [malformed image name](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L163)) will fail fast and not be sent to kube-apiserver. This improves system performance by reducing unnecessary load.
 
-After validation, kubectl then begins assembling the HTTP request it'll send to kube-apiserver. All attempts to mutate state in the Kubernetes system flows through the API server, which in turns communicates with etcd. The kubectl client is no different. To construct the HTTP request, kubectl entities called "generators".
+After validation, kubectl begins assembling the HTTP request it will send to kube-apiserver. All attempts to access or change state in the Kubernetes system goes through the API server, which in turns communicates with etcd. The kubectl client is no different. To construct the HTTP request, kubectl uses something called [generators](https://kubernetes.io/docs/user-guide/kubectl-conventions/#generators) which is an abstraction that takes care of serialization.
 
-What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L231-L257) the resource type if the generator name wasn't explicitly specified using the `--generator` flag. For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered Pods. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (indicated by the `--dry-run` flag). 
+What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L231-L257) the resource type if the generator name wasn't explicitly specified using the `--generator` flag. 
+
+For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered Pods. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (indicated by the `--dry-run` flag). 
 
 After realising that we want to create a Deployment, it will use the `DeploymentV1Beta1` generator to generate a [runtime object](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/run.go#L59) from our provided parameters. A "runtime object" is a generic term for a resource. 
 
-**Aside**: What's worth pointing out before we continue is that Kubernetes uses a _versioned_ API that is categorised into "API groups". An API group is meant to categorise similar resources so that they're easier to reason about. It also provides a better alternative to a singular monolithic API. The API group of a Deployment is named `apps`, and its most recent version is `v1beta2`. This is why you need type `apiVersion: apps/v1beta2` at the top of your Deployment manifests.
+### API groups and version negotiation
 
-Anywho. After kubectl generates the runtime object, it starts to [find the appropriate API group and version](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L580-L597) for it and then [assembles a versioned client](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L598) that is aware of the various REST semantics for the resource. This discovery stage is called version negotiation and involves kubectl scanning the `/apis` path to retrieve all possible API groups. Since kube-apiserver exposes its schema document (in OpenAPI format) at this path, it's easy for clients to perform their own discovery. To improve performance, kubectl also [caches the OpenAPI schema](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/cmd/util/factory_client_access.go#L117) to the `~/.kube/schema` directory. If you want to see this API discovery in action, try deleting that directory and running a command with the `-v` flag turned to the max. You'll see all the HTTP requests outputted to find the API versions. 
+What's worth pointing out before we continue is that Kubernetes uses a _versioned_ API that is categorised into "API groups". An API group is meant to categorise similar resources so that they're easier to reason about. It also provides a better alternative to a singular monolithic API. The API group of a Deployment is named `apps`, and its most recent version is `v1beta2`. This is why you need type `apiVersion: apps/v1beta2` at the top of your Deployment manifests.
 
-The final step is to actually perform the [HTTP request](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L628). kubectl will then print out a success message [based on the desired output format](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L403-L407).
+Anywho... After kubectl generates the runtime object, it starts to [find the appropriate API group and version](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L580-L597) for it and then [assembles a versioned client](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L598) that is aware of the various REST semantics for the resource. This discovery stage is called version negotiation and involves kubectl scanning the `/apis` path on the remote API to retrieve all possible API groups. Since kube-apiserver exposes its schema document (in OpenAPI format) at this path, it's easy for clients to perform their own discovery. 
 
-## client auth
+To improve performance, kubectl also [caches the OpenAPI schema](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/cmd/util/factory_client_access.go#L117) to the `~/.kube/schema` directory. If you want to see this API discovery in action, try deleting that directory and running a command with the `-v` flag turned to the max. You'll see all the HTTP requests which are trying to find those API versions. There are lots!
 
-One thing that we've so far neglected to mention is client authentication, so let's look at that now.
+The final step is to actually [send](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L628) the HTTP request. Once it does so and gets back a successful response, kubectl will then print out a success message [based on the desired output format](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L403-L407).
 
-In order to send the request successfully, kubectl needs to be able to authenticate. User credentials are almost always stored in the `kubeconfig` file which resides on disk, but that can be stored in different locations. To locate it, kubectl does the following:
+### Client auth
+
+One thing that we didn't mention in the previous step is client authentication (this is handled before the HTTP request is sent), so let's look at that now.
+
+In order to send the request successfully, kubectl needs to be able to authenticate. User credentials are almost always stored in the `kubeconfig` file which resides on disk, but that file can be stored in different locations. To locate it, kubectl does the following:
 
 - if a `--kubeconfig` flag is provided, use that.
 - if the `$KUBECONFIG` environment variable is defined, use that.
@@ -47,9 +80,11 @@ After parsing the file, it then determines the current context to use, the curre
 - username and password are [sent](https://github.com/kubernetes/client-go/blob/c6f8cf2c47d21d55fa0df928291b2580544886c8/transport/round_trippers.go#L223) via HTTP basic authentication
 - the OpenID auth process is handled manually by the user beforehand, producing a token which is sent like a bearer token
 
-## server auth
+## kube-apiserver
 
-So our request has been sent, hooray! What next? This is where kube-apiserver enters the picture. As we've already mentioned, kube-server is the primary interface that clients and system compoenents use to persist and retrieve cluster state. To perform its function, it needs to be able to verify that the requester is who they say there are. This process is called authentication.
+### Authentication
+
+So our request has been sent, hooray! What next? This is where kube-apiserver enters the picture. As we've already mentioned, kube-server is the primary interface that clients and system components use to persist and retrieve cluster state. To perform its function, it needs to be able to verify that the requester is who they say there are. This process is called authentication.
 
 How does the apiserver authenticate requests? When the server first starts, it looks at all the [CLI flags](https://kubernetes.io/docs/admin/kube-apiserver/) the user provided and assembles a list of suitable authenticators. Let's take an example: if a `--client-ca-file` has been passed in, it appends the [x509 authenticator](); if it sees `--token-auth-file` provided, it appends the [token authenticator]() to the list. Every time a request is received, it is [run through the authenticator chain until one succeeds](): 
 
@@ -59,11 +94,11 @@ How does the apiserver authenticate requests? When the server first starts, it l
 
 If _every_ authenticator fails, [the request fails](https://github.com/kubernetes/apiserver/blob/20bfbdf738a0643fe77ffd527b88034dcde1b8e3/pkg/authentication/request/union/union.go#L71) and an aggregate error is returned. If authentication succeeds, the `Authorization` header is removed from the request, and [user information is added](https://github.com/kubernetes/apiserver/blob/e30df5e70ef9127ea69d607207c894251025e55b/pkg/endpoints/filters/authentication.go#L71-L75) to its context. This gives future steps (such as authorization and admission controllers) the ability to access the previously established identity of the user. 
 
-## authorization
+### Authorization
 
 Okay, the request has been sent, and kube-apiserver has successfully verified we are who we say we are. What a relief! However, we're not done yet. We may be who we say we are, but do we have the permissions to perform this action? Identity and permission are not the same thing, after all. In order for us to continue, kube-apiserver needs to authorize us.
 
-The way kube-apiserver handles authorization is very similar to authentication: based on flag inputs, it will assemble a chain of authorizers that will be run against every incoming request. If all authorizers deny the request, the request results in a `Forbidden` response and [goes no further down the chain](https://github.com/kubernetes/apiserver/blob/e30df5e70ef9127ea69d607207c894251025e55b/pkg/endpoints/filters/authorization.go#L60). If a single authorizer approves, the request proceeds.
+The way kube-apiserver handles authorization is very similar to authentication: based on flag inputs, it will assemble a chain of authorizers that will be run against every incoming request. If _all_ authorizers deny the request, the request results in a `Forbidden` response and [goes no further](https://github.com/kubernetes/apiserver/blob/e30df5e70ef9127ea69d607207c894251025e55b/pkg/endpoints/filters/authorization.go#L60). If a single authorizer approves, the request proceeds.
 
 Some examples of authorizers that ship with v1.8 are:
 
@@ -72,11 +107,11 @@ Some examples of authorizers that ship with v1.8 are:
 - [RBAC](https://github.com/kubernetes/kubernetes/blob/8db5ca1fbb280035b126faf0cd7f0420cec5b2b6/plugin/pkg/auth/authorizer/rbac/rbac.go#L43), which enforces RBAC roles which are added by the admin as k8s resources
 - [Node](https://github.com/kubernetes/kubernetes/blob/dd9981d038012c120525c9e6df98b3beb3ef19e1/plugin/pkg/auth/authorizer/node/node_authorizer.go#L67), which ensures that node clients, i.e. the kubelet, can only access resources hosted on itself.
 
-Check out how each one performs authorization!
+Check out the `Authorize` method for each one to see how they work!
 
-## admission controllers
+### Admission control
 
-Okay, so by this point we've authenticated and been authorized by the kube-apiserver. So what's left? From kube-apiserver's perspective, it believes who we are and permits us to continue, but with Kubernetes, other parts of the system have strong opinions about what should and should not be permitted to happen. This is where [admission controllers](https://kubernetes.io/docs/admin/admission-controllers/#what-are-they) enter the picture.
+Okay, so by this point we've authenticated and have been authorized by the kube-apiserver. So what's left? From kube-apiserver's perspective, it believes who we are and permits us to continue, but with Kubernetes, other parts of the system have strong opinions about what should and should not be permitted to happen. This is where [admission controllers](https://kubernetes.io/docs/admin/admission-controllers/#what-are-they) enter the picture.
 
 Whilst authorization is focused on answering whether a user has permission, admission controllers intercept the request to ensure that it matches the wider expectations and rules of the cluster. They are the last bastion of control before an object is persisted to etcd, so they encapsulate the remaining system checks to ensure an action does not produce unexpected or negative results.
 
@@ -90,22 +125,22 @@ Admission controllers are usually categorised into resource management, security
 - `LimitRanger` sets defaults for container requests and limits, or enforce upper bounds on certain resources (no more than 2GB of memory, default to 512MB); 
 - `ResourceQuota` calculates and denies a number of objects (pods, rc, service load balancers) or total consumed resources (cpu, memory, disk) in a namespace.
 
-## each object save to etcd
+## etcd
 
 By this point, Kubernetes has fully vetted the incoming request and has permitted it to go forth and prosper. In the next step, kube-apiserver deserializes the HTTP request, constructs runtime objects from them (kinda like the inverse process of kubectl's generators), and persists them to the datastore. Let's break that down a bit.
 
 How does kube-apiserver know what to do when it accepts our request? Well, there's a pretty complicated series of steps that happen _before_ any requests are served. Let's start at the beginning, from when the binary is first run:
 
-1. When the kube-apiserver binary is run, it [creates a server chain](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L119), which allows apiserver aggregation. This is basically a way of supporting multiple apiservers (we don't need to worry about this).
+1. When the `kube-apiserver` binary is run, it [creates a server chain](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L119), which allows apiserver aggregation. This is basically a way of supporting multiple apiservers (we don't need to worry about this).
 1. When this happens, a [generic apiserver is created](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L149) that serves as a default implementation. 
 1. The generated OpenAPI schema populates the [apiserver's configuration](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/config.go#L149).
-1. kube-server then iterates over all the API groups specified in the schema and configures a [storage provider](https://github.com/kubernetes/kubernetes/blob/c7a1a061c3dc5acabcc0c35b3b96a6935dccf546/pkg/master/master.go#L410) for each that serves as a generic storage abstraction. This is what kube-apiserver talks to this when it accesses or mutates the state of a resource.
+1. kube-apiserver then iterates over all the API groups specified in the schema and configures a [storage provider](https://github.com/kubernetes/kubernetes/blob/c7a1a061c3dc5acabcc0c35b3b96a6935dccf546/pkg/master/master.go#L410) for each that serves as a generic storage abstraction. This is what kube-apiserver talks to when it accesses or mutates the state of a resource.
 1. For every API group it also iterates over each of the group versions and [installs the REST mappings](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/groupversion.go#L92) for every HTTP route. This allows kube-apiserver to map requests and be able to delegate off to the correct logic once it finds a match.
-1. For our specific use case, a [POST handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/installer.go#L710) is registered for , which in turn will delegate to a [create resource handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L37).
+1. For our specific use case, a [POST handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/installer.go#L710) is registered, which in turn will delegate to a [create resource handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L37).
 
 By this point, kube-apiserver is fully aware of what routes exist and has an internal mapping of which handlers and storage providers to invoke if a request matches. What a smart cookie. Now let's imagine our HTTP request has flown in:
 
-1. If the handler chain can match the request to a set pattern (i.e. to the routes we registered), it will [dispatch the dedicated handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/handler.go#L143) that was registered for the route. Otherwise it fall back to a [path-based handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L248) (i.e. what happens when you call `/apis`). If no handlers are registered for that path, a [not found handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L254) is invoked which results in a 404.
+1. If the handler chain can match the request to a set pattern (i.e. to the routes we registered), it will [dispatch the dedicated handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/handler.go#L143) that was registered for the route. Otherwise it fall back to a [path-based handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L248) (this is what happens when you call `/apis`). If no handlers are registered for that path, a [not found handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L254) is invoked which results in a 404.
 1. Luckily for us, we have a registered route called [`createHandler`](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L37)! What does it do? Well it will first decode the HTTP request and perform basic validation, such as ensuring the JSON they provided correlates with our expectation of the versioned API resource.
 1. Auditing and final admission [will occur](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L93-L104). 
 1. The resource will be [saved to etcd](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L111) by [delegating to the storage provider](https://github.com/kubernetes/apiserver/blob/19667a1afc13cc13930c40a20f2c12bbdcaaa246/pkg/registry/generic/registry/store.go#L327). Usually the etcd key will be the form of `<namespace>/<name>`, but this is configurable.
@@ -114,15 +149,15 @@ By this point, kube-apiserver is fully aware of what routes exist and has an int
 
 That's a lot of steps! It's pretty amazing to follow the crumbs down the rabbit hole because we realise how much work the apiserver actually does. So to summarise: our Deployment resource now exists in etcd. But just to throw a spanner in the works, you won't be able to see it yet...
 
-## initializers
+## Initializers
 
-After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [intializers](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registed, this initialization step is skipped and it resources are made visible immediately. 
+After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [intializers](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registered, this initialization step is skipped and resources are made visible immediately. 
 
-As [many great blog posts](https://ahmet.im/blog/initializers/) have pointed out, this is a powerful feature because it allows us to perform bootstrap operations. Examples could be:
+As [many great blog posts](https://ahmet.im/blog/initializers/) have pointed out, this is a powerful feature because it allows us to perform generic bootstrap operations. Examples could be:
 
-- Injecting a proxy sidecar container into the pod if it has an exposed port 80, or a particular annotation.
-- Injecting a volume with test certificates to all pods in the test namespace automatically.
-- If a Secret is shorter than 20 characters (probably a password), prevent its creation.
+- Injecting a proxy sidecar container into Pod that expose port 80, or feature a particular annotation.
+- Injecting a volume with test certificates to all Pods in a specific namespace.
+- If a Secret is shorter than 20 characters (e.g. a password), prevent its creation.
 
 `initializerConfiguration` objects allow you to declare which initializers should run for certain resource types. Imagine we want a custom initializer to run every time a Pod is created, we'd do something like this:
 
@@ -142,16 +177,18 @@ initializers:
           - pods
 ```
 
-After creating this config, it will append `custom-pod-initializer` to every Pod's `metadata.initializers.pending` field after creation. The initializer would be routinely scanning for new pods and, when it detects its name in the pending field, will perform any logic. After it completes its process, it removes its name from the pending list. Only initializers whose name is first in the list may operate on the resource. When all initializers finish and the `pending` field is empty, the object will be considered initialized.
+After creating this config, it will append `custom-pod-initializer` to every Pod's `metadata.initializers.pending` field. The initializer controller would already be deployed and would be routinely scanning for new Pods. When the initializer detects one with its name in the Pod's pending field, it will perform its logic. After it completes its process, it removes its name from the pending list. Only initializers whose name is first in the list may operate on the resource. When all initializers finish and the `pending` field is empty, the object will be considered initialized.
 
-The eagle-eyed of your may have a spotted a potential problem. How can a userland controller process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even unitialized ones. 
+The eagle-eyed of you may have a spotted a potential problem. How can a userland controller process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even unitialized ones. 
 
-## deployment controller creates replicasets
+## Control loops
 
-By this stage, our Deployment record exists in etcd and any initialization logic has completed. The next stages involve us setting up the resource topology that Kubernetes concepts rely on. When we think about it, a Deployment is really just a collection of ReplicaSets, and a ReplicaSet is a collection of Pods. So how does Kubernetes go about creating this hierarchy from one HTTP request? This is where Kubernetes built-in controllers take over.
+### Deployments controller
+
+By this stage, our Deployment record exists in etcd and any initialization logic has completed. The next stages involve us setting up the resource topology that Kubernetes relies on. When we think about it, a Deployment is really just a collection of ReplicaSets, and a ReplicaSet is a collection of Pods. So how does Kubernetes go about creating this hierarchy from one HTTP request? This is where Kubernetes' built-in controllers take over.
 
 Kubernetes makes strong use of "controllers" throughout the system. A controller is an asychronous script that works to reconcile the 
-current state of the Kubernetes system to a desired state. Each controller has a small responsibility and is run in parallel by kube-controller-manager component. Let's introduce ourselves to the first one that takes over, the Deployment controller.
+current state of the Kubernetes system to a desired state. Each controller has a small responsibility and is run in parallel by the `kube-controller-manager` component. Let's introduce ourselves to the first one that takes over, the Deployment controller.
 
 After a Deployment record is stored to etcd and initialized, it is made visible via kube-apiserver. When this new resource is available, it is detected by the Deployment controller, whose job it is to listen out for changes to Deployment records. In our case, the controller [registers a specific callback](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L122) for create events via an informer (see below for more information about what this is). 
 
@@ -161,17 +198,17 @@ After realising none exist, it will begin a [scaling process](https://github.com
 
 The [status is then updated](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L70) and it then re-enters the same reconciliation loop waiting for the deployment to match a desired, completed state. Since the Deployment controller is only concerned about creating ReplicaSets, this reconcilation stage needs to be continued by the next controller, the ReplicaSet controller. 
 
-## replicaset controller creates pods
+### ReplicaSets controller
 
 In the previous step, the Deployments controller created our Deployment's first ReplicaSet but we still have no Pods. This is where the ReplicaSet controller comes into play! Its job is to monitor the lifecycle of ReplicaSets and their dependent resources (Pods). Like most other controllers, it does this by triggering handlers on certain events.
 
-The event we're interested in is creation. When a ReplicaSet is created (courtesy of the Deployments controller) the RS controller [inspects the state](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L583) of the new ReplicaSet and realizes there is a skew between what exists and what is required. It then seeks to reconcile this state by [bumping the number of pods](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L460) that belong to the replica set. It starts creating them in a careful manner, ensuring that the ReplicaSet's burst count (which it inherited from its parent Deployment) is always matched. 
+The event we're interested in is creation. When a ReplicaSet is created (courtesy of the Deployments controller) the RS controller [inspects the state](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L583) of the new ReplicaSet and realizes there is a skew between what exists and what is required. It then seeks to reconcile this state by [bumping the number of pods](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L460) that belong to the ReplicaSet. It starts creating them in a careful manner, ensuring that the ReplicaSet's burst count (which it inherited from its parent Deployment) is always matched. 
 
 Create operations for Pods [are also batched](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L487), starting with `SlowStartInitialBatchSize` and doubling with each successful iteration in a kind of "slow start" operation. This aims to mitigate the risk of swamping kube-apiserver with unnecessary HTTP requests when there are numerous pod bootup failures (for example, due to resource quotas). If we're going to fail, we might as well fail gracefully with minimal impact on other system components! 
 
 Kubernetes enforces object hierarchies through Owner References (a field in the child resource where it references the ID of its parent). Not only does this ensure that child resources are garbage-collected once a resource managed by the controller is deleted (cascading deletion), it also provides an effective way for parent resources to not fight over their children (imagine the scenario where two potential parents think they own the same child!). 
 
-Another subtle benefit of the Owner Reference design is that it's stateful: if any controller were to restart, that downtime would not affect the wider system since resource topology is independent of the controller's lifecycle. This focus on isolation also creeps in to the design of controllers themselves: they should not operate on resources they don't explicitly own. Controllers should instead be selective in its ownership assertions, non-interfering, and non-sharing. 
+Another subtle benefit of the Owner Reference design is that it's stateful: if any controller were to restart, that downtime would not affect the wider system since resource topology is independent of the controller. This focus on isolation also creeps in to the design of controllers themselves: they should not operate on resources they don't explicitly own. Controllers should instead be selective in its ownership assertions, non-interfering, and non-sharing. 
 
 Anyway, back to owner references! Sometimes there are "orphaned" resources in the system which usually happens when:
 
@@ -180,15 +217,15 @@ Anyway, back to owner references! Sometimes there are "orphaned" resources in th
 
 When this occurs, controllers will ensure that orphans are adopted by a new parent. Multiple parents can race to adopt a child, but only one will be successful (the others will receive a validation error). 
 
-### [side point]: accessing state with informers
+### Informers
 
-As you might have noticed, some controllers like the RBAC authenticator or the Deployment controller need to retrieve cluster state to function. To return to the example of the RBAC authorizer, we know that when a request comes in, the authenticator will save an initial representation of user state for later use. The RBAC authorizer will then use this to retrieve all the roles and role bindings that are associated with the user in etcd. How are controllers supposed to access and modify such resources? It turns out this is a common use case and is solved in Kubernetes with informers. 
+As you might have noticed, some controllers like the RBAC authorizer or the Deployment controller need to retrieve cluster state to function. To return to the example of the RBAC authorizer, we know that when a request comes in, the authenticator will save an initial representation of user state for later use. The RBAC authorizer will then use this to retrieve all the roles and role bindings that are associated with the user in etcd. How are controllers supposed to access and modify such resources? It turns out this is a common use case and is solved in Kubernetes with informers. 
 
 An informer is a pattern that allows controllers to subscribe to storage events and easily list resources they're interested in. Apart from providing an abstraction which is nice to work with, it also takes care of a lot of the nuts and bolts such as caching (caching is important because it reduces unnecessary kube-apiserver connections, and reduces duplicate serialization costs server- and controller-side). By using this design, it also allows controllers to interact in a threadsafe manner without having to worry about stepping on anybody else's toes. 
 
 For more information about how informers work in relation to controllers, check out [this blog post](http://borismattijssen.github.io/articles/kubernetes-informers-controllers-reflectors-stores).
 
-## scheduler assigns node
+### Scheduler
 
 After all the controllers have run, we have a Deployment, a ReplicaSet and three Pods stored in etcd and available through kube-apiserver. Our pods, however, are stuck in a `Pending` state because they have not yet been scheduled to a Node. The final controller that resolves this is the scheduler.
 
@@ -208,7 +245,9 @@ Once the scheduler has scheduled a Pod to a Node, the kubelet on that Node can t
 
 **Side note: customising the scheduler:** What's interesting is that both predicate and priority functions are extensible and can be defined by using the `--policy-config-file` flag. This introduces a degree of flexibility. Administrators can also run custom schedulers (controllers with custom processing logic) in standalone Deployments. If a PodSpec contains `schedulerName`, Kubernetes will hand over scheduling for that pod to whatever scheduler thas has registered itself under that name.
 
-## kubelet begins pod sync
+## kubelet 
+
+### Pod sync
 
 Okay, the main controller loop has finished, phew! Let's summarise: the HTTP request passed authentication, authorization, and admission control stages; a Deployment, ReplicaSet, and three Pod resources were persisted to etcd; a series of initializers ran; and, finally, each Pod was scheduled to a suitable node. So far, however, the state we've been reasoning about exists purely in etcd. The next steps involve distributing state across the worker nodes, which is the whole point of a distributed system like Kubernetes! The way this happens is through a component called the kubelet. Let's begin!
 
@@ -229,7 +268,7 @@ A useful way of thinking about the kubelet is again like a controller! It querie
 1. All secrets defined in `Spec.ImagePullSecrets` are [retrieved from the apiserver](https://github.com/kubernetes/kubernetes/blob/dd9981d038012c120525c9e6df98b3beb3ef19e1/pkg/kubelet/kubelet_pods.go#L788) so that they can later be injected into the container.
 1. The container runtime then runs the container (described in more detail below).
 
-## CRI and pause containers
+### CRI and pause containers
 
 We're at the point now where most of the set-up is done and the container is ready to be launched. The software that does this launching is called the Container Runtime (`docker` or `rkt` are examples).
 
@@ -241,7 +280,7 @@ In our case, we're using Docker. In this runtime, creating a sandbox involves cr
 
 The "pause" container provides a way to host all of these namespaces and allow child containers to share them. By being a part of the same network namespace, one benefit is that containers in the same pod can refer to one another using `localhost`. The _second_ role of a pause container is related to how PID namespaces work. In these types of namespaces, processes form a hierarchical tree and the "init" process at the top takes responsibility for "reaping" dead processes. For more information on how this works, check out this [great blog post](https://www.ianlewis.org/en/almighty-pause-container). After the pause container has been created, it is checkpointed to disk, and started.
 
-## CNI and pod networking
+### CNI and pod networking
 
 Our Pod now has its bare bones: a pause container which hosts all of the namespaces to allow inter-pod communication. But how does networking work and how is it set up? 
 
@@ -270,7 +309,7 @@ It also specifies additional metadata for pod, such as its name and namespace vi
 What happens next is dependent on the CNI plugin, but let's look at the `bridge` CNI plugin:
 
 1. The plugin will first set up a local Linux bridge in the root network namespace to serve all containers on that host
-1. It will then insert an interface (one end of a veth pair) into the pause container's network namespace and attach the other end connected to the bridge. The best way to think about a veth pair is like a tube: one side is connected to the container and the other side is in the root network namespace, allowing packets to travel inbetween. 
+1. It will then insert an interface (one end of a veth pair) into the pause container's network namespace and attach the other end to the bridge. The best way to think about a veth pair is like a big tube: one side is connected to the container and the other side is in the root network namespace, allowing packets to travel inbetween. 
 1. It should then assign an IP to the pause container's interface and set up the routes. This will result in the Pod having its own IP address. IP assignment is delegated to the IPAM providers specified to the JSON configuration. 
     - IPAM plugins are similar to main network plugins: they are invoked via a binary and have a standardised interface. Each must determine the IP/subnet of the container's interface, along with the gateway and routes, and return this information back to the main plugin. The most common IPAM plugin is called `host-local` and allocates IP addresses out of a predefined set of address ranges. It stores the state locally on the host filesystem, therefore ensuring uniqueness of IP addresses on a single host.
 1. For DNS, the kubelet will specify the internal DNS server IP address to the CNI plugin, which will ensure that the container's `resolv.conf` file is set appropriately. 
@@ -281,9 +320,9 @@ Once the process is complete, the plugin will return JSON data back to the kubel
 
 So far we've described how containers connect to the host, but how do hosts communicate? This will obviously happen if two Pods on different machines want to communicate.
 
-This is usually accomplished using a concept called overlay networking, which is a way to dynamically sychronize routes across multiple hosts. One popular overlay network provider is Flannel. When installed, its core responsibility is to provide a layer-3 IPv4 network between multiple nodes in a cluster. Flannel does not control how containers are networked to the host (this is the job of CNI remember), but rather how the traffic is transported _between_ hosts. To do this, it selects a subnet for the host and registers it with etcd. It then keeps a local representation of the cluster routes and encapsulates outgoing packets in UDP datagrams, ensuring it reaches the right host. For more information, check out [CoreOS's documentation](https://github.com/coreos/flannel).
+This is usually accomplished using a concept called overlay networking, which is a way to dynamically synchronize routes across multiple hosts. One popular overlay network provider is Flannel. When installed, its core responsibility is to provide a layer-3 IPv4 network between multiple nodes in a cluster. Flannel does not control how containers are networked to the host (this is the job of CNI remember), but rather how the traffic is transported _between_ hosts. To do this, it selects a subnet for the host and registers it with etcd. It then keeps a local representation of the cluster routes and encapsulates outgoing packets in UDP datagrams, ensuring it reaches the right host. For more information, check out [CoreOS's documentation](https://github.com/coreos/flannel).
 
-## containers are started
+### Container startup
 
 All the networking shenanigans are done and out of the way. What's left? Well we need to actually start out workload containers. 
 
@@ -295,7 +334,7 @@ Once the sandbox has finished initializing and is active, the kubelet can begin 
 1. The container is then [started](https://github.com/kubernetes/kubernetes/blob/5f9f4a1c5939436fa320e9bc5973a55d6446e59f/pkg/kubelet/kuberuntime/kuberuntime_container.go#L135).
 1. If any post-start container lifecycle hooks are registered, they are [run](https://github.com/kubernetes/kubernetes/blob/5f9f4a1c5939436fa320e9bc5973a55d6446e59f/pkg/kubelet/kuberuntime/kuberuntime_container.go#L156-L170). Hooks can either be of the type `Exec` (executes a specific command inside the container) or `HTTP` (performs a HTTP request against a container endpoint). If the PostStart hook takes too long to run, hangs, or fails, the container will never reach a `running` state.
 
-## wrap-up
+## Wrap-up
 
 Okay, phew. Done. Finito.
 
