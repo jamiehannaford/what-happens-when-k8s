@@ -117,7 +117,7 @@ Whilst authorization is focused on answering whether a user has permission, admi
 
 The way admission controllers work is similar to way authenticators and authorizers work, but there is one difference: unlike authenticator and authorizers chains, if a single admission controller fails, the whole chain is broken and the request will fail. 
 
-What's really cool about the design of admission controllers is its focus on promoting extensibility. Each controller is stored as a plugin in the [`plugin/pkg/admission` directory](), and is made to satisfy a small interface. Each one is then compiled into main kubernetes binary itself. 
+What's really cool about the design of admission controllers is its focus on promoting extensibility. Each controller is stored as a plugin in the [`plugin/pkg/admission` directory](https://github.com/kubernetes/kubernetes/tree/master/plugin/pkg/admission), and is made to satisfy a small interface. Each one is then compiled into main kubernetes binary itself. 
 
 Admission controllers are usually categorised into resource management, security, defaulting, and referential consistency. Here are some examples of admission controllers that just take care of resource management:
 
