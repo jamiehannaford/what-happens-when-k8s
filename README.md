@@ -49,7 +49,7 @@ After validation, kubectl begins assembling the HTTP request it will send to kub
 
 What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L231-L257) the resource type if the generator name wasn't explicitly specified using the `--generator` flag. 
 
-For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered Pods. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (indicated by the `--dry-run` flag). 
+For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered Jobs. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (indicated by the `--dry-run` flag). 
 
 After realising that we want to create a Deployment, it will use the `DeploymentV1Beta1` generator to generate a [runtime object](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/run.go#L59) from our provided parameters. A "runtime object" is a generic term for a resource. 
 
