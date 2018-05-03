@@ -8,7 +8,7 @@ kubectl run --image=nginx --replicas=3
 
 and hit enter. After a few seconds, I should see three nginx pods spread across all my worker nodes. It works like magic, and that's great! But what's really going on under the hood?
 
-One of the awesome things about Kubernetes is that it handles the deployment of workloads across infrastructure through user-friendly APIs. Complexity is hidden by simple abstraction. But in order to fully understand the value it offers us, it's also useful to understand its internals. This guide will lead you through the full lifecycle of a request from the client to the kubelet, linking off to the source code where necessary to illustrate what's going on.
+One of the awesome things about Kubernetes is that it handles the deployment of workloads across infrastructure through user-friendly APIs. Complexity is hidden by simple abstractions. But in order to fully understand the value it offers us, it's also useful to understand its internals. This guide will lead you through the full lifecycle of a request from the client to the kubelet, linking off to the source code where necessary to illustrate what's going on.
 
 This is a living document. If you spot areas that can be improved or rewritten, contributions are welcome!
 
@@ -17,7 +17,7 @@ This is a living document. If you spot areas that can be improved or rewritten, 
 1. [kubectl](#kubectl)
    - [validation and generators](#validation-and-generators)
    - [API groups and version negotiation](#api-groups-and-version-negotiation)
-   - [client-side auth](#client-side-auth)
+   - [client-side auth](#client-auth)
 1. [kube-apiserver](#kube-apiserver)
    - [authentication](#authentication)
    - [authorization](#authorization)
@@ -43,7 +43,7 @@ This is a living document. If you spot areas that can be improved or rewritten, 
 
 Okay, so let's begin. We've just hit enter in our terminal. What now?
 
-The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will _always_ fail (e.g. creating a non-supported resource or using a [malformed image name](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L163)) will fail fast and not be sent to kube-apiserver. This improves system performance by reducing unnecessary load.
+The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will _always_ fail (e.g. creating a non-supported resource or using a [malformed image name](https://github.com/kubernetes/kubernetes/blob/9a480667493f6275c22cc9cd0f69fb0c75ef3579/pkg/kubectl/cmd/run.go#L251)) will fail fast and not be sent to kube-apiserver. This improves system performance by reducing unnecessary load.
 
 After validation, kubectl begins assembling the HTTP request it will send to kube-apiserver. All attempts to access or change state in the Kubernetes system goes through the API server, which in turns communicates with etcd. The kubectl client is no different. To construct the HTTP request, kubectl uses something called [generators](https://kubernetes.io/docs/user-guide/kubectl-conventions/#generators) which is an abstraction that takes care of serialization.
 
@@ -57,9 +57,9 @@ After realising that we want to create a Deployment, it will use the `Deployment
 
 What's worth pointing out before we continue is that Kubernetes uses a _versioned_ API that is categorised into "API groups". An API group is meant to categorise similar resources so that they're easier to reason about. It also provides a better alternative to a singular monolithic API. The API group of a Deployment is named `apps`, and its most recent version is `v1beta2`. This is why you need type `apiVersion: apps/v1beta2` at the top of your Deployment manifests.
 
-Anywho... After kubectl generates the runtime object, it starts to [find the appropriate API group and version](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L580-L597) for it and then [assembles a versioned client](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L598) that is aware of the various REST semantics for the resource. This discovery stage is called version negotiation and involves kubectl scanning the `/apis` path on the remote API to retrieve all possible API groups. Since kube-apiserver exposes its schema document (in OpenAPI format) at this path, it's easy for clients to perform their own discovery. 
+Anyhow... After kubectl generates the runtime object, it starts to [find the appropriate API group and version](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L580-L597) for it and then [assembles a versioned client](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L598) that is aware of the various REST semantics for the resource. This discovery stage is called version negotiation and involves kubectl scanning the `/apis` path on the remote API to retrieve all possible API groups. Since kube-apiserver exposes its schema document (in OpenAPI format) at this path, it's easy for clients to perform their own discovery. 
 
-To improve performance, kubectl also [caches the OpenAPI schema](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/cmd/util/factory_client_access.go#L117) to the `~/.kube/schema` directory. If you want to see this API discovery in action, try deleting that directory and running a command with the `-v` flag turned to the max. You'll see all the HTTP requests which are trying to find those API versions. There are lots!
+To improve performance, kubectl also [caches the OpenAPI schema](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/cmd/util/factory_client_access.go#L117) to the `~/.kube/cache/discovery` directory. If you want to see this API discovery in action, try deleting that directory and running a command with the `-v` flag turned to the max. You'll see all the HTTP requests which are trying to find those API versions. There are lots!
 
 The final step is to actually [send](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L628) the HTTP request. Once it does so and gets back a successful response, kubectl will then print out a success message [based on the desired output format](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L403-L407).
 
@@ -73,7 +73,7 @@ In order to send the request successfully, kubectl needs to be able to authentic
 - if the `$KUBECONFIG` environment variable is defined, use that.
 - otherwise look in a [predictable home directory](https://github.com/kubernetes/client-go/blob/master/tools/clientcmd/loader.go#L52) like `~/.kube`, and use the first file found.
 
-After parsing the file, it then determines the current context to use, the current cluster to point to, and any auth information associated with the current user. If the user provided flag-specific values (such as `--username`) these take precedence and will override those specified in kubeconfig. Once it has this information, kubectl populates the client's configuration so that it is able decorate the HTTP request appropriately:
+After parsing the file, it then determines the current context to use, the current cluster to point to, and any auth information associated with the current user. If the user provided flag-specific values (such as `--username`) these take precedence and will override those specified in kubeconfig. Once it has this information, kubectl populates the client's configuration so that it is able to decorate the HTTP request appropriately:
 
 - x509 certificates are sent using [`tls.TLSConfig`](https://github.com/kubernetes/client-go/blob/82aa063804cf055e16e8911250f888bc216e8b61/rest/transport.go#L80-L89) (this also includes the root CA)
 - bearer tokens are [sent](https://github.com/kubernetes/client-go/blob/c6f8cf2c47d21d55fa0df928291b2580544886c8/transport/round_trippers.go#L314) in the "Authorization" HTTP header
