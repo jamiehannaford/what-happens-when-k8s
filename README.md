@@ -179,7 +179,7 @@ initializers:
 
 After creating this config, it will append `custom-pod-initializer` to every Pod's `metadata.initializers.pending` field. The initializer controller would already be deployed and would be routinely scanning for new Pods. When the initializer detects one with its name in the Pod's pending field, it will perform its logic. After it completes its process, it removes its name from the pending list. Only initializers whose name is first in the list may operate on the resource. When all initializers finish and the `pending` field is empty, the object will be considered initialized.
 
-The eagle-eyed of you may have a spotted a potential problem. How can a userland controller process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even unitialized ones. 
+The eagle-eyed of you may have a spotted a potential problem. How can a userland controller, process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even unitialized ones. 
 
 ## Control loops
 
@@ -231,7 +231,7 @@ After all the controllers have run, we have a Deployment, a ReplicaSet and three
 
 The scheduler runs as a standalone component of the control plane and operates in the same way as other controllers: it listens out for events and attempts to reconcile state. In this case, it [filters pods](https://github.com/kubernetes/kubernetes/blob/master/plugin/pkg/scheduler/factory/factory.go#L190) that have an empty `NodeName` field in their PodSpec and attempts to find a suitable Node that the pod can reside on. 
 
-In order to find a suitable pod, a specific scheduling algorithm is used. The way the default scheduling algorithm works is the following:
+In order to find a suitable Node, a specific scheduling algorithm is used. The way the default scheduling algorithm works is the following:
 
 1. When the scheduler starts, a [chain of default predicates are registered](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/plugin/pkg/scheduler/algorithmprovider/defaults/defaults.go#L65-L81). These predicates are effectively functions that, when evaluated, [filter Nodes](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/plugin/pkg/scheduler/core/generic_scheduler.go#L117) based on their suitability to host a pod. For example, if the PodSpec explicitly requests CPU or RAM resources, and a Node cannot meet these requests due to lack of capacity, it will be deselected for the Pod (resource capacity is calculated as the _total capacity_ minus the _sum of the resource requests_ of currently running containers).
 
