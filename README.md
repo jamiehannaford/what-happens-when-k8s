@@ -55,7 +55,7 @@ After realising that we want to create a Deployment, it will use the `Deployment
 
 ### API groups and version negotiation
 
-What's worth pointing out before we continue is that Kubernetes uses a _versioned_ API that is categorised into "API groups". An API group is meant to categorise similar resources so that they're easier to reason about. It also provides a better alternative to a singular monolithic API. The API group of a Deployment is named `apps`, and its most recent version is `v1beta2`. This is why you need type `apiVersion: apps/v1beta2` at the top of your Deployment manifests.
+What's worth pointing out before we continue is that Kubernetes uses a _versioned_ API that is categorised into "API groups". An API group is meant to categorise similar resources so that they're easier to reason about. It also provides a better alternative to a singular monolithic API. The API group of a Deployment is named `apps`, and its most recent version is `v1`. This is why you need type `apiVersion: apps/v1` at the top of your Deployment manifests.
 
 Anyhow... After kubectl generates the runtime object, it starts to [find the appropriate API group and version](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L580-L597) for it and then [assembles a versioned client](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L598) that is aware of the various REST semantics for the resource. This discovery stage is called version negotiation and involves kubectl scanning the `/apis` path on the remote API to retrieve all possible API groups. Since kube-apiserver exposes its schema document (in OpenAPI format) at this path, it's easy for clients to perform their own discovery. 
 
