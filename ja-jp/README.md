@@ -51,7 +51,7 @@ kubectl が最初に行うのはクライアントサイドのバリデーショ
 
 たとえば、 `--restart-policy = Always` をリソースは Deployment リソースとみなされ、 `--restart-policy = Never` を持つリソースは Pod リソースとみなされます。kubectl はコマンドを記録する（ロールアウトや監査用）など他のアクションを起動する必要があるかどうか、このコマンドが単なるドライランであるかどうか（ `--dry-run` フラグが指定される）も判断します。
 
-Deployment リソースを作成したいことが認識された後、提供されたパラメータから[ランタイムオブジェクトを生成](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/generate/versioned/run.go#L61)するために `DeploymentV1Beta1` ジェネレーターを使います。「ランタイムオブジェクト」はリソースの総称です。
+Deployment リソースを作成したいことが認識された後、提供されたパラメータから[ランタイムオブジェクトを生成](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/generate/versioned/run.go#L237)するために `DeploymentAppsV1` ジェネレーターを使います。「ランタイムオブジェクト」はリソースの総称です。
 
 ### APIグループとバージョンネゴシエーション
 
