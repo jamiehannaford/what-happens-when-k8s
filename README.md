@@ -47,7 +47,7 @@ The first thing that kubectl will do is perform some client-side validation. Thi
 
 After validation, kubectl begins assembling the HTTP request it will send to kube-apiserver. All attempts to access or change state in the Kubernetes system goes through the API server, which in turns communicates with etcd. The kubectl client is no different. To construct the HTTP request, kubectl uses something called [generators](https://kubernetes.io/docs/user-guide/kubectl-conventions/#generators) which is an abstraction that takes care of serialization.
 
-What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L231-L257) the resource type if the generator name wasn't explicitly specified using the `--generator` flag. 
+What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/2345831b82dbc02ce6733b71a44f2087188c58cf/pkg/kubectl/cmd/run/run.go#L315-L346) the resource type if the generator name wasn't explicitly specified using the `--generator` flag. 
 
 For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered Pods. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (indicated by the `--dry-run` flag). 
 
