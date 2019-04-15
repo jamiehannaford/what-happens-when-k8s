@@ -43,15 +43,15 @@ This is a living document. If you spot areas that can be improved or rewritten, 
 
 Okay, so let's begin. We've just hit enter in our terminal. What now?
 
-The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will _always_ fail (e.g. creating a non-supported resource or using a [malformed image name](https://github.com/kubernetes/kubernetes/blob/9a480667493f6275c22cc9cd0f69fb0c75ef3579/pkg/kubectl/cmd/run.go#L251)) will fail fast and not be sent to kube-apiserver. This improves system performance by reducing unnecessary load.
+The first thing that kubectl will do is perform some client-side validation. This ensures that requests that will _always_ fail (e.g. creating a non-supported resource or using a [malformed image name](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L264)) will fail fast and not be sent to kube-apiserver. This improves system performance by reducing unnecessary load.
 
 After validation, kubectl begins assembling the HTTP request it will send to kube-apiserver. All attempts to access or change state in the Kubernetes system goes through the API server, which in turns communicates with etcd. The kubectl client is no different. To construct the HTTP request, kubectl uses something called [generators](https://kubernetes.io/docs/user-guide/kubectl-conventions/#generators) which is an abstraction that takes care of serialization.
 
-What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L231-L257) the resource type if the generator name wasn't explicitly specified using the `--generator` flag. 
+What may not be obvious is that you can actually specify multiple resource types with `kubectl run`, not just Deployments. To make that work, kubectl will [infer](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L319-L339) the resource type if the generator name wasn't explicitly specified using the `--generator` flag.
 
-For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered Pods. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (indicated by the `--dry-run` flag). 
+For example, resources that have `--restart-policy=Always` are considered Deployments, and those with `--restart-policy=Never` are considered Pods. kubectl will also figure out whether other actions need to be triggered, such as recording the command (for rollouts or auditing), or whether this command is just a dry run (indicated by the `--dry-run` flag).
 
-After realising that we want to create a Deployment, it will use the `DeploymentV1Beta1` generator to generate a [runtime object](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/run.go#L59) from our provided parameters. A "runtime object" is a generic term for a resource. 
+After realising that we want to create a Deployment, it will use the `DeploymentAppsV1` generator to generate a [runtime object](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/generate/versioned/run.go#L237) from our provided parameters. A "runtime object" is a generic term for a resource.
 
 ### API groups and version negotiation
 

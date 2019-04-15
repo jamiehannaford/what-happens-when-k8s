@@ -43,15 +43,15 @@ Kubernetes の素晴らしいところの1つは、ユーザーフレンドリ�
 
 さあ始めましょう。ターミナルでエンターキーを押しました。何が起こりますか？
 
-kubectl が最初に行うのはクライアントサイドのバリデーションです。これにより、**必ず**失敗するリクエスト（サポートされていないリソースの作成や[不正な形式のイメージ名](https://github.com/kubernetes/kubernetes/blob/9a480667493f6275c22cc9cd0f69fb0c75ef3579/pkg/kubectl/cmd/run.go#L251)を使用することなど）は早く失敗し、kube-apiserver に送信されません。これにより、不要な負荷を減少させ、システムパフォーマンスが向上します。
+kubectl が最初に行うのはクライアントサイドのバリデーションです。これにより、**必ず**失敗するリクエスト（サポートされていないリソースの作成や[不正な形式のイメージ名](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L264)を使用することなど）は早く失敗し、kube-apiserver に送信されません。これにより、不要な負荷を減少させ、システムパフォーマンスが向上します。
 
-バリデーション後、kubectl は kube-apiserver に送信する HTTP リクエストの組み立てを開始します。Kubernetes システム内の状態にアクセスしたり状態を変更しようとする試みはすべて API サーバーを介して行われ、API サーバーは etcd と通信します。kubectl クライアントも同じです。HTTP リクエストを構築するために、kubectl はジェネレーターと呼ばれるものを使用します。これはシリアル化を処理する抽象です。
+バリデーション後、kubectl は kube-apiserver に送信する HTTP リクエストの組み立てを開始します。Kubernetes システム内の状態にアクセスしたり状態を変更しようとする試みはすべて API サーバーを介して行われ、API サーバーは etcd と通信します。kubectl クライアントも同じです。HTTP リクエストを構築するために、kubectl は[ジェネレーター](https://kubernetes.io/docs/user-guide/kubectl-conventions/#generators)と呼ばれるものを使用します。これはシリアル化を処理する抽象です。
 
-`kubectl run` の対象には Deployment リソースだけでなく複数のリソースタイプを指定できるのはよくわからないかもしれません。これを機能させるために、ジェネレーター名が `--generator` フラグを使って明示的に指定されていなければ、kubectl はリソースタイプを[推測](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L231-L257)します。
+`kubectl run` の対象には Deployment リソースだけでなく複数のリソースタイプを指定できるのはよくわからないかもしれません。これを機能させるために、ジェネレーター名が `--generator` フラグを使って明示的に指定されていなければ、kubectl はリソースタイプを[推測](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L319-L339)します。
 
 たとえば、 `--restart-policy = Always` をリソースは Deployment リソースとみなされ、 `--restart-policy = Never` を持つリソースは Pod リソースとみなされます。kubectl はコマンドを記録する（ロールアウトや監査用）など他のアクションを起動する必要があるかどうか、このコマンドが単なるドライランであるかどうか（ `--dry-run` フラグが指定される）も判断します。
 
-Deployment リソースを作成したいことが認識された後、提供されたパラメータからランタイムオブジェクトを生成するために `DeploymentV1Beta1` ジェネレーターを使います。「ランタイムオブジェクト」はリソースの総称です。
+Deployment リソースを作成したいことが認識された後、提供されたパラメータから[ランタイムオブジェクトを生成](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/generate/versioned/run.go#L237)するために `DeploymentAppsV1` ジェネレーターを使います。「ランタイムオブジェクト」はリソースの総称です。
 
 ### APIグループとバージョンネゴシエーション
 
