@@ -57,11 +57,11 @@ Deployment リソースを作成したいことが認識された後、提供さ
 
 先に進む前に指摘する価値があるのは、Kubernetes は「APIグループ」に分類される _versioned_API を使用しているということです。APIグループは、似たリソースを分類して、簡単に推測できるようにすることを目的としています。それはまた、単一のモノリシックAPIに対するより良い代替手段を提供します。Deployment リソースのAPIグループは `apps` という名前で、その最新バージョンは `v1` です。Deployment リソースのマニフェストの上部に `apiVersion: apps/v1` と書く必要があるのはこのためです。
 
-とにかく... kubectl はランタイムオブジェクトを生成した後、[適切なAPIグループとそれに対するバージョンを見つけ始め](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L580-L597)、リソースに対する様々なRESTセマンティクスを知っている[バージョン管理されたクライアント](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L598)を組み立てます。この探索ステージはバージョンネゴシエーションと呼ばれ、すべての利用可能なAPIグループを取得するためにリモートAPI上の `/apis` パスを kubectl がスキャンすることを含みます。kube-apiserver はこのパスでスキーマ文書（ OpenAPI フォーマット）を公開しているので、クライアントがディスカバリーを実行するのは簡単です。
+とにかく... kubectl はランタイムオブジェクトを生成した後、[適切なAPIグループとそれに対するバージョンを見つけ始め](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L674-L686)、リソースに対する様々なRESTセマンティクスを知っている[バージョン管理されたクライアント](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L705-L708)を組み立てます。この探索ステージはバージョンネゴシエーションと呼ばれ、すべての利用可能なAPIグループを取得するためにリモートAPI上の `/apis` パスを kubectl がスキャンすることを含みます。kube-apiserver はこのパスでスキーマ文書（ OpenAPI フォーマット）を公開しているので、クライアントがディスカバリーを実行するのは簡単です。
 
-パフォーマンスを向上させるため、kubectl は [OpenAPI スキーマを `〜/.kube/cache/discovery` ディレクトリにもキャッシュします](https://github.com/kubernetes/kubernetes/blob/7650665059e65b4b22375d1e28da5306536a12fb/pkg/kubectl/cmd/util/factory_client_access.go#L117)。この API のディスカバリーを実際に見たい場合、そのディレクトリを削除し、 `-v` フラグを最大にしてコマンドを実行してみてください。それらの API バージョンを見つけようとしているすべての HTTP リクエストが表示されます。たくさんあります！
+パフォーマンスを向上させるため、kubectl は [OpenAPI スキーマを `〜/.kube/cache/discovery` ディレクトリにもキャッシュします](https://github.com/kubernetes/kubernetes/blob/v1.14.0/staging/src/k8s.io/cli-runtime/pkg/genericclioptions/config_flags.go#L234)。この API のディスカバリーを実際に見たい場合、そのディレクトリを削除し、 `-v` フラグを最大にしてコマンドを実行してみてください。それらの API バージョンを見つけようとしているすべての HTTP リクエストが表示されます。たくさんあります！
 
-最後のステップは、実際に HTTP リクエストを[送信する](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L628)ことです。リクエストが行われ成功レスポンスが返ってきたら、kubectl は[希望された出力フォーマットに基づいて](https://github.com/kubernetes/kubernetes/blob/master/pkg/kubectl/cmd/run.go#L403-L407)成功メッセージを表示します。
+最後のステップは、実際に HTTP リクエストを[送信する](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L709)ことです。リクエストが行われ成功レスポンスが返ってきたら、kubectl は[希望された出力フォーマットに基づいて](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubectl/cmd/run/run.go#L459)成功メッセージを表示します。
 
 ### クライアント認証
 
