@@ -12,30 +12,30 @@ One of the awesome things about Kubernetes is that it handles the deployment of 
 
 This is a living document. If you spot areas that can be improved or rewritten, contributions are welcome!
 
-## contents
+## Contents
 
 1. [kubectl](#kubectl)
-   - [validation and generators](#validation-and-generators)
+   - [Validation and generators](#validation-and-generators)
    - [API groups and version negotiation](#api-groups-and-version-negotiation)
-   - [client-side auth](#client-auth)
+   - [Client auth](#client-auth)
 1. [kube-apiserver](#kube-apiserver)
-   - [authentication](#authentication)
-   - [authorization](#authorization)
-   - [admission control](#admission-control)
+   - [Authentication](#authentication)
+   - [Authorization](#authorization)
+   - [Admission control](#admission-control)
 1. [etcd](#etcd)
-1. [initializers](#initializers)
-1. [control loops](#control-loops)
-   - [deployments controller](#deployments-controller)
-   - [replicasets controller](#replicasets-controller)
-   - [informers](#informers)
-   - [scheduler](#scheduler)
+1. [Initializers](#initializers)
+1. [Control loops](#control-loops)
+   - [Deployments controller](#deployments-controller)
+   - [ReplicaSets controller](#replicasets-controller)
+   - [Informers](#informers)
+   - [Scheduler](#scheduler)
 1. [kubelet](#kubelet)
-   - [pod sync](#pod-sync)
+   - [Pod sync](#pod-sync)
    - [CRI and pause containers](#cri-and-pause-containers)
    - [CNI and pod networking](#cni-and-pod-networking)
-   - [inter-host networking](#inter-host-networking)
-   - [container startup](#container-startup)
-1. [wrap-up](#wrap-up)
+   - [Inter-host networking](#inter-host-networking)
+   - [Container startup](#container-startup)
+1. [Wrap-up](#wrap-up)
 
 ## kubectl
 
@@ -86,13 +86,13 @@ After parsing the file, it then determines the current context to use, the curre
 
 So our request has been sent, hooray! What next? This is where kube-apiserver enters the picture. As we've already mentioned, kube-apiserver is the primary interface that clients and system components use to persist and retrieve cluster state. To perform its function, it needs to be able to verify that the requester is who they say there are. This process is called authentication.
 
-How does the apiserver authenticate requests? When the server first starts, it looks at all the [CLI flags](https://kubernetes.io/docs/admin/kube-apiserver/) the user provided and assembles a list of suitable authenticators. Let's take an example: if a `--client-ca-file` has been passed in, it appends the x509 authenticator; if it sees `--token-auth-file` provided, it appends the token authenticator to the list. Every time a request is received, it is [run through the authenticator chain until one succeeds](https://github.com/kubernetes/apiserver/blob/51bebaffa01be9dc28195140da276c2f39a10cd4/pkg/authentication/request/union/union.go#L54): 
+How does the apiserver authenticate requests? When the server first starts, it looks at all the [CLI flags](https://kubernetes.io/docs/admin/kube-apiserver/) the user provided and assembles a list of suitable authenticators. Let's take an example: if a `--client-ca-file` has been passed in, it appends the x509 authenticator; if it sees `--token-auth-file` provided, it appends the token authenticator to the list. Every time a request is received, it is [run through the authenticator chain until one succeeds](https://github.com/kubernetes/apiserver/blob/51bebaffa01be9dc28195140da276c2f39a10cd4/pkg/authentication/request/union/union.go#L54):
 
 - the [x509 handler](https://github.com/kubernetes/apiserver/blob/51bebaffa01be9dc28195140da276c2f39a10cd4/pkg/authentication/request/x509/x509.go#L60) will verify that the HTTP request is encoded with a TLS key signed by the CA root cert
 - the [bearer token handler](https://github.com/kubernetes/apiserver/blob/51bebaffa01be9dc28195140da276c2f39a10cd4/pkg/authentication/request/bearertoken/bearertoken.go#L38) will verify that the provided token (specified in the HTTP Authorization header) exists in the file on disk specified by `--token-auth-file`
 - the [basicauth handler](https://github.com/kubernetes/apiserver/blob/51bebaffa01be9dc28195140da276c2f39a10cd4/plugin/pkg/authenticator/request/basicauth/basicauth.go#L37) will similarly ensure that the HTTP request's basic auth credentials match its own local state.
 
-If _every_ authenticator fails, [the request fails](https://github.com/kubernetes/apiserver/blob/20bfbdf738a0643fe77ffd527b88034dcde1b8e3/pkg/authentication/request/union/union.go#L71) and an aggregate error is returned. If authentication succeeds, the `Authorization` header is removed from the request, and [user information is added](https://github.com/kubernetes/apiserver/blob/e30df5e70ef9127ea69d607207c894251025e55b/pkg/endpoints/filters/authentication.go#L71-L75) to its context. This gives future steps (such as authorization and admission controllers) the ability to access the previously established identity of the user. 
+If _every_ authenticator fails, [the request fails](https://github.com/kubernetes/apiserver/blob/20bfbdf738a0643fe77ffd527b88034dcde1b8e3/pkg/authentication/request/union/union.go#L71) and an aggregate error is returned. If authentication succeeds, the `Authorization` header is removed from the request, and [user information is added](https://github.com/kubernetes/apiserver/blob/e30df5e70ef9127ea69d607207c894251025e55b/pkg/endpoints/filters/authentication.go#L71-L75) to its context. This gives future steps (such as authorization and admission controllers) the ability to access the previously established identity of the user.
 
 ### Authorization
 
@@ -115,14 +115,14 @@ Okay, so by this point we've authenticated and have been authorized by the kube-
 
 Whilst authorization is focused on answering whether a user has permission, admission controllers intercept the request to ensure that it matches the wider expectations and rules of the cluster. They are the last bastion of control before an object is persisted to etcd, so they encapsulate the remaining system checks to ensure an action does not produce unexpected or negative results.
 
-The way admission controllers work is similar to way authenticators and authorizers work, but there is one difference: unlike authenticator and authorizers chains, if a single admission controller fails, the whole chain is broken and the request will fail. 
+The way admission controllers work is similar to way authenticators and authorizers work, but there is one difference: unlike authenticator and authorizers chains, if a single admission controller fails, the whole chain is broken and the request will fail.
 
-What's really cool about the design of admission controllers is its focus on promoting extensibility. Each controller is stored as a plugin in the [`plugin/pkg/admission` directory](https://github.com/kubernetes/kubernetes/tree/master/plugin/pkg/admission), and is made to satisfy a small interface. Each one is then compiled into main kubernetes binary itself. 
+What's really cool about the design of admission controllers is its focus on promoting extensibility. Each controller is stored as a plugin in the [`plugin/pkg/admission` directory](https://github.com/kubernetes/kubernetes/tree/master/plugin/pkg/admission), and is made to satisfy a small interface. Each one is then compiled into main kubernetes binary itself.
 
 Admission controllers are usually categorised into resource management, security, defaulting, and referential consistency. Here are some examples of admission controllers that just take care of resource management:
 
-- `InitialResources` sets default resource limits to the resources for a container based on past usage; 
-- `LimitRanger` sets defaults for container requests and limits, or enforce upper bounds on certain resources (no more than 2GB of memory, default to 512MB); 
+- `InitialResources` sets default resource limits to the resources for a container based on past usage;
+- `LimitRanger` sets defaults for container requests and limits, or enforce upper bounds on certain resources (no more than 2GB of memory, default to 512MB);
 - `ResourceQuota` calculates and denies a number of objects (pods, rc, service load balancers) or total consumed resources (cpu, memory, disk) in a namespace.
 
 ## etcd
@@ -132,7 +132,7 @@ By this point, Kubernetes has fully vetted the incoming request and has permitte
 How does kube-apiserver know what to do when it accepts our request? Well, there's a pretty complicated series of steps that happen _before_ any requests are served. Let's start at the beginning, from when the binary is first run:
 
 1. When the `kube-apiserver` binary is run, it [creates a server chain](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L119), which allows apiserver aggregation. This is basically a way of supporting multiple apiservers (we don't need to worry about this).
-1. When this happens, a [generic apiserver is created](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L149) that serves as a default implementation. 
+1. When this happens, a [generic apiserver is created](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L149) that serves as a default implementation.
 1. The generated OpenAPI schema populates the [apiserver's configuration](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/config.go#L149).
 1. kube-apiserver then iterates over all the API groups specified in the schema and configures a [storage provider](https://github.com/kubernetes/kubernetes/blob/c7a1a061c3dc5acabcc0c35b3b96a6935dccf546/pkg/master/master.go#L410) for each that serves as a generic storage abstraction. This is what kube-apiserver talks to when it accesses or mutates the state of a resource.
 1. For every API group it also iterates over each of the group versions and [installs the REST mappings](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/groupversion.go#L92) for every HTTP route. This allows kube-apiserver to map requests and be able to delegate off to the correct logic once it finds a match.
@@ -142,7 +142,7 @@ By this point, kube-apiserver is fully aware of what routes exist and has an int
 
 1. If the handler chain can match the request to a set pattern (i.e. to the routes we registered), it will [dispatch the dedicated handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/handler.go#L143) that was registered for the route. Otherwise it falls back to a [path-based handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L248) (this is what happens when you call `/apis`). If no handlers are registered for that path, a [not found handler](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/mux/pathrecorder.go#L254) is invoked which results in a 404.
 1. Luckily for us, we have a registered route called [`createHandler`](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L37)! What does it do? Well it will first decode the HTTP request and perform basic validation, such as ensuring the JSON they provided correlates with our expectation of the versioned API resource.
-1. Auditing and final admission [will occur](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L93-L104). 
+1. Auditing and final admission [will occur](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L93-L104).
 1. The resource will be [saved to etcd](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L111) by [delegating to the storage provider](https://github.com/kubernetes/apiserver/blob/19667a1afc13cc13930c40a20f2c12bbdcaaa246/pkg/registry/generic/registry/store.go#L327). Usually the etcd key will be the form of `<namespace>/<name>`, but this is configurable.
 1. Any create errors are caught and, finally, the storage provider performs a `get` call to ensure the object was actually created. It then invokes any post-create handlers and decorators if additional finalization is required.
 1. The HTTP response [is constructed](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/handlers/create.go#L131-L142) and sent back.
@@ -151,7 +151,7 @@ That's a lot of steps! It's pretty amazing to follow the crumbs down the rabbit 
 
 ## Initializers
 
-After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [intializers](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registered, this initialization step is skipped and resources are made visible immediately. 
+After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [intializers](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registered, this initialization step is skipped and resources are made visible immediately.
 
 As [many great blog posts](https://ahmet.im/blog/initializers/) have pointed out, this is a powerful feature because it allows us to perform generic bootstrap operations. Examples could be:
 
@@ -179,7 +179,7 @@ initializers:
 
 After creating this config, it will append `custom-pod-initializer` to every Pod's `metadata.initializers.pending` field. The initializer controller would already be deployed and would be routinely scanning for new Pods. When the initializer detects one with its name in the Pod's pending field, it will perform its logic. After it completes its process, it removes its name from the pending list. Only initializers whose name is first in the list may operate on the resource. When all initializers finish and the `pending` field is empty, the object will be considered initialized.
 
-The eagle-eyed of you may have a spotted a potential problem. How can a userland controller process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even unitialized ones. 
+The eagle-eyed of you may have a spotted a potential problem. How can a userland controller process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even unitialized ones.
 
 ## Control loops
 
@@ -187,41 +187,41 @@ The eagle-eyed of you may have a spotted a potential problem. How can a userland
 
 By this stage, our Deployment record exists in etcd and any initialization logic has completed. The next stages involve us setting up the resource topology that Kubernetes relies on. When we think about it, a Deployment is really just a collection of ReplicaSets, and a ReplicaSet is a collection of Pods. So how does Kubernetes go about creating this hierarchy from one HTTP request? This is where Kubernetes' built-in controllers take over.
 
-Kubernetes makes strong use of "controllers" throughout the system. A controller is an asychronous script that works to reconcile the 
+Kubernetes makes strong use of "controllers" throughout the system. A controller is an asychronous script that works to reconcile the
 current state of the Kubernetes system to a desired state. Each controller has a small responsibility and is run in parallel by the `kube-controller-manager` component. Let's introduce ourselves to the first one that takes over, the Deployment controller.
 
-After a Deployment record is stored to etcd and initialized, it is made visible via kube-apiserver. When this new resource is available, it is detected by the Deployment controller, whose job it is to listen out for changes to Deployment records. In our case, the controller [registers a specific callback](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L122) for create events via an informer (see below for more information about what this is). 
+After a Deployment record is stored to etcd and initialized, it is made visible via kube-apiserver. When this new resource is available, it is detected by the Deployment controller, whose job it is to listen out for changes to Deployment records. In our case, the controller [registers a specific callback](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L122) for create events via an informer (see below for more information about what this is).
 
 This handler will be executed when our Deployment first becomes available and will start by [adding the object to an internal work queue](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L170). By the time it gets around to processing our object, the controller will [inspect our Deployment](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L572) and [realise](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L633) that there are no ReplicaSet or Pod records associated with it. It does this by querying kube-apiserver with label selectors. What's interesting to note is that this sychronization process is state agnostic: it reconciles new records in the same way as existing ones.
 
-After realising none exist, it will begin a [scaling process](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L385) to start resolving state. It does this by rolling out (i.e. creating) a ReplicaSet resource, assigning it a label selector, and giving it the revision number of 1. The ReplicaSet's PodSpec is copied from the Deployment's manifest, as well as other relevant metadata. Sometimes the Deployment record will need to be updated after this as well (for instance if the progress deadline is set). 
+After realising none exist, it will begin a [scaling process](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L385) to start resolving state. It does this by rolling out (i.e. creating) a ReplicaSet resource, assigning it a label selector, and giving it the revision number of 1. The ReplicaSet's PodSpec is copied from the Deployment's manifest, as well as other relevant metadata. Sometimes the Deployment record will need to be updated after this as well (for instance if the progress deadline is set).
 
-The [status is then updated](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L70) and it then re-enters the same reconciliation loop waiting for the deployment to match a desired, completed state. Since the Deployment controller is only concerned about creating ReplicaSets, this reconcilation stage needs to be continued by the next controller, the ReplicaSet controller. 
+The [status is then updated](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L70) and it then re-enters the same reconciliation loop waiting for the deployment to match a desired, completed state. Since the Deployment controller is only concerned about creating ReplicaSets, this reconcilation stage needs to be continued by the next controller, the ReplicaSet controller.
 
 ### ReplicaSets controller
 
 In the previous step, the Deployments controller created our Deployment's first ReplicaSet but we still have no Pods. This is where the ReplicaSet controller comes into play! Its job is to monitor the lifecycle of ReplicaSets and their dependent resources (Pods). Like most other controllers, it does this by triggering handlers on certain events.
 
-The event we're interested in is creation. When a ReplicaSet is created (courtesy of the Deployments controller) the RS controller [inspects the state](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L583) of the new ReplicaSet and realizes there is a skew between what exists and what is required. It then seeks to reconcile this state by [bumping the number of pods](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L460) that belong to the ReplicaSet. It starts creating them in a careful manner, ensuring that the ReplicaSet's burst count (which it inherited from its parent Deployment) is always matched. 
+The event we're interested in is creation. When a ReplicaSet is created (courtesy of the Deployments controller) the RS controller [inspects the state](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L583) of the new ReplicaSet and realizes there is a skew between what exists and what is required. It then seeks to reconcile this state by [bumping the number of pods](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L460) that belong to the ReplicaSet. It starts creating them in a careful manner, ensuring that the ReplicaSet's burst count (which it inherited from its parent Deployment) is always matched.
 
-Create operations for Pods [are also batched](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L487), starting with `SlowStartInitialBatchSize` and doubling with each successful iteration in a kind of "slow start" operation. This aims to mitigate the risk of swamping kube-apiserver with unnecessary HTTP requests when there are numerous pod bootup failures (for example, due to resource quotas). If we're going to fail, we might as well fail gracefully with minimal impact on other system components! 
+Create operations for Pods [are also batched](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/replicaset/replica_set.go#L487), starting with `SlowStartInitialBatchSize` and doubling with each successful iteration in a kind of "slow start" operation. This aims to mitigate the risk of swamping kube-apiserver with unnecessary HTTP requests when there are numerous pod bootup failures (for example, due to resource quotas). If we're going to fail, we might as well fail gracefully with minimal impact on other system components!
 
-Kubernetes enforces object hierarchies through Owner References (a field in the child resource where it references the ID of its parent). Not only does this ensure that child resources are garbage-collected once a resource managed by the controller is deleted (cascading deletion), it also provides an effective way for parent resources to not fight over their children (imagine the scenario where two potential parents think they own the same child!). 
+Kubernetes enforces object hierarchies through Owner References (a field in the child resource where it references the ID of its parent). Not only does this ensure that child resources are garbage-collected once a resource managed by the controller is deleted (cascading deletion), it also provides an effective way for parent resources to not fight over their children (imagine the scenario where two potential parents think they own the same child!).
 
-Another subtle benefit of the Owner Reference design is that it's stateful: if any controller were to restart, that downtime would not affect the wider system since resource topology is independent of the controller. This focus on isolation also creeps in to the design of controllers themselves: they should not operate on resources they don't explicitly own. Controllers should instead be selective in its ownership assertions, non-interfering, and non-sharing. 
+Another subtle benefit of the Owner Reference design is that it's stateful: if any controller were to restart, that downtime would not affect the wider system since resource topology is independent of the controller. This focus on isolation also creeps in to the design of controllers themselves: they should not operate on resources they don't explicitly own. Controllers should instead be selective in its ownership assertions, non-interfering, and non-sharing.
 
 Anyway, back to owner references! Sometimes there are "orphaned" resources in the system which usually happens when:
 
 1. a parent is deleted but not its children
 2. garbage collection policies prohibit child deletion
 
-When this occurs, controllers will ensure that orphans are adopted by a new parent. Multiple parents can race to adopt a child, but only one will be successful (the others will receive a validation error). 
+When this occurs, controllers will ensure that orphans are adopted by a new parent. Multiple parents can race to adopt a child, but only one will be successful (the others will receive a validation error).
 
 ### Informers
 
-As you might have noticed, some controllers like the RBAC authorizer or the Deployment controller need to retrieve cluster state to function. To return to the example of the RBAC authorizer, we know that when a request comes in, the authenticator will save an initial representation of user state for later use. The RBAC authorizer will then use this to retrieve all the roles and role bindings that are associated with the user in etcd. How are controllers supposed to access and modify such resources? It turns out this is a common use case and is solved in Kubernetes with informers. 
+As you might have noticed, some controllers like the RBAC authorizer or the Deployment controller need to retrieve cluster state to function. To return to the example of the RBAC authorizer, we know that when a request comes in, the authenticator will save an initial representation of user state for later use. The RBAC authorizer will then use this to retrieve all the roles and role bindings that are associated with the user in etcd. How are controllers supposed to access and modify such resources? It turns out this is a common use case and is solved in Kubernetes with informers.
 
-An informer is a pattern that allows controllers to subscribe to storage events and easily list resources they're interested in. Apart from providing an abstraction which is nice to work with, it also takes care of a lot of the nuts and bolts such as caching (caching is important because it reduces unnecessary kube-apiserver connections, and reduces duplicate serialization costs server- and controller-side). By using this design, it also allows controllers to interact in a threadsafe manner without having to worry about stepping on anybody else's toes. 
+An informer is a pattern that allows controllers to subscribe to storage events and easily list resources they're interested in. Apart from providing an abstraction which is nice to work with, it also takes care of a lot of the nuts and bolts such as caching (caching is important because it reduces unnecessary kube-apiserver connections, and reduces duplicate serialization costs server- and controller-side). By using this design, it also allows controllers to interact in a threadsafe manner without having to worry about stepping on anybody else's toes.
 
 For more information about how informers work in relation to controllers, check out [this blog post](http://borismattijssen.github.io/articles/kubernetes-informers-controllers-reflectors-stores).
 
@@ -229,7 +229,7 @@ For more information about how informers work in relation to controllers, check 
 
 After all the controllers have run, we have a Deployment, a ReplicaSet and three Pods stored in etcd and available through kube-apiserver. Our pods, however, are stuck in a `Pending` state because they have not yet been scheduled to a Node. The final controller that resolves this is the scheduler.
 
-The scheduler runs as a standalone component of the control plane and operates in the same way as other controllers: it listens out for events and attempts to reconcile state. In this case, it [filters pods](https://github.com/kubernetes/kubernetes/blob/master/plugin/pkg/scheduler/factory/factory.go#L190) that have an empty `NodeName` field in their PodSpec and attempts to find a suitable Node that the pod can reside on. 
+The scheduler runs as a standalone component of the control plane and operates in the same way as other controllers: it listens out for events and attempts to reconcile state. In this case, it [filters pods](https://github.com/kubernetes/kubernetes/blob/master/plugin/pkg/scheduler/factory/factory.go#L190) that have an empty `NodeName` field in their PodSpec and attempts to find a suitable Node that the pod can reside on.
 
 In order to find a suitable node, a specific scheduling algorithm is used. The way the default scheduling algorithm works is the following:
 
@@ -239,13 +239,13 @@ In order to find a suitable node, a specific scheduling algorithm is used. The w
 
 Once the algorithm finds a node, the scheduler then [creates a Binding](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/plugin/pkg/scheduler/scheduler.go#L336-L342) object whose Name and UID match the Pod, and whose ObjectReference field contains the name of the selected Node. This is then [sent to the apiserver](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/plugin/pkg/scheduler/factory/factory.go#L1095) via a POST request.
 
-When kube-apiserver receives this Binding object, the registry deserializes the object and updates the following fields on the Pod object: it [sets the NodeName](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/registry/core/pod/storage/storage.go#L170) to the one in the ObjectReference, it [adds any relevant annotations](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/registry/core/pod/storage/storage.go#L174-L176), and [sets](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/registry/core/pod/storage/storage.go#L177-L180) its `PodScheduled` status condition to `True`. 
+When kube-apiserver receives this Binding object, the registry deserializes the object and updates the following fields on the Pod object: it [sets the NodeName](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/registry/core/pod/storage/storage.go#L170) to the one in the ObjectReference, it [adds any relevant annotations](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/registry/core/pod/storage/storage.go#L174-L176), and [sets](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/registry/core/pod/storage/storage.go#L177-L180) its `PodScheduled` status condition to `True`.
 
 Once the scheduler has scheduled a Pod to a Node, the kubelet on that Node can take over to begin the deployment. Exciting!
 
 **Side note: customising the scheduler:** What's interesting is that both predicate and priority functions are extensible and can be defined by using the `--policy-config-file` flag. This introduces a degree of flexibility. Administrators can also run custom schedulers (controllers with custom processing logic) in standalone Deployments. If a PodSpec contains `schedulerName`, Kubernetes will hand over scheduling for that pod to whatever scheduler thas has registered itself under that name.
 
-## kubelet 
+## kubelet
 
 ### Pod sync
 
@@ -274,15 +274,15 @@ We're at the point now where most of the set-up is done and the container is rea
 
 In an effort to be more extensible, the kubelet since v1.5.0 has been using a concept called CRI (Container Runtime Interface) for interacting with concrete container runtimes. In a nutshell, CRI provides an abstraction between the kubelet and a specific runtime implementation. Communication happens via [protocol buffers](https://github.com/google/protobuf) (it's like a faster JSON) and a [gRPC API](https://grpc.io/) (a type of API well-suited to performing Kubernetes operations). This is an incredibly cool idea because by using a defined contract between the kubelet and the runtime, the actual implementation details of how containers are orchestrated become largely irrelevant. All that matters is the contract. This allows new runtimes to be added with minimal overhead since no core Kubernetes code needs to change!
 
-Enough digressions, let's get back to deploying our container... When a pod is first started, kubelet [invokes the `RunPodSandbox`](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/kubelet/kuberuntime/kuberuntime_sandbox.go#L51) remote procedure command (RPC). A "sandbox" is a CRI term to describe a set of containers, which in Kubernetes parlance is, you guessed it, a Pod. The term is deliberately vague so it doesn't lose meaning for other runtimes that may not actually use containers (imagine a hypervisor-based runtime where a sandbox might be a VM). 
+Enough digressions, let's get back to deploying our container... When a pod is first started, kubelet [invokes the `RunPodSandbox`](https://github.com/kubernetes/kubernetes/blob/2d64ce5e8e45e26b02492d2b6c85e5ebfb1e4761/pkg/kubelet/kuberuntime/kuberuntime_sandbox.go#L51) remote procedure command (RPC). A "sandbox" is a CRI term to describe a set of containers, which in Kubernetes parlance is, you guessed it, a Pod. The term is deliberately vague so it doesn't lose meaning for other runtimes that may not actually use containers (imagine a hypervisor-based runtime where a sandbox might be a VM).
 
-In our case, we're using Docker. In this runtime, creating a sandbox involves creating a "pause" container. A pause container serves like a parent for all of the other containers in the Pod since it hosts a lot of the pod-level resources that workload containers will end up using. These "resources" are Linux namespaces (IPC, network, PID). If you're not familiar with how containers work in Linux, let's take a quick refresher. The Linux kernel has the concept of namespaces, which allow the host OS to carve out a dedicated set of resources (CPU or memory for example) and offer it to a process as if it's the only thing in the world using them. Cgroups are also important here, since they're the way that Linux governs resource allocation (it's kinda like a cop that polices resource usage). Docker uses both of these Kernel features to host a process that has guaranteed resources and enforced isolation. For more information, check out b0rk's amazing post: [What even is a Container?](https://jvns.ca/blog/2016/10/10/what-even-is-a-container/). 
+In our case, we're using Docker. In this runtime, creating a sandbox involves creating a "pause" container. A pause container serves like a parent for all of the other containers in the Pod since it hosts a lot of the pod-level resources that workload containers will end up using. These "resources" are Linux namespaces (IPC, network, PID). If you're not familiar with how containers work in Linux, let's take a quick refresher. The Linux kernel has the concept of namespaces, which allow the host OS to carve out a dedicated set of resources (CPU or memory for example) and offer it to a process as if it's the only thing in the world using them. Cgroups are also important here, since they're the way that Linux governs resource allocation (it's kinda like a cop that polices resource usage). Docker uses both of these Kernel features to host a process that has guaranteed resources and enforced isolation. For more information, check out b0rk's amazing post: [What even is a Container?](https://jvns.ca/blog/2016/10/10/what-even-is-a-container/).
 
 The "pause" container provides a way to host all of these namespaces and allow child containers to share them. By being a part of the same network namespace, one benefit is that containers in the same pod can refer to one another using `localhost`. The _second_ role of a pause container is related to how PID namespaces work. In these types of namespaces, processes form a hierarchical tree and the "init" process at the top takes responsibility for "reaping" dead processes. For more information on how this works, check out this [great blog post](https://www.ianlewis.org/en/almighty-pause-container). After the pause container has been created, it is checkpointed to disk, and started.
 
 ### CNI and pod networking
 
-Our Pod now has its bare bones: a pause container which hosts all of the namespaces to allow inter-pod communication. But how does networking work and how is it set up? 
+Our Pod now has its bare bones: a pause container which hosts all of the namespaces to allow inter-pod communication. But how does networking work and how is it set up?
 
 When the kubelet sets up networking for a pod it delegates the task to a "CNI" plugin. CNI stands for Container Network Interface and operates in a similar way to the Container Runtime Interface. In a nutshell, CNI is an abstraction that allows different network providers to use different networking implementations for containers. Plugins are registered and the kubelet interacts with them by streaming JSON data (config files are located in `/etc/cni/net.d`) to the relevant CNI binary (located in `/opt/cni/bin`) via stdin. This is an example of the JSON configuration:
 
@@ -309,12 +309,12 @@ It also specifies additional metadata for pod, such as its name and namespace vi
 What happens next is dependent on the CNI plugin, but let's look at the `bridge` CNI plugin:
 
 1. The plugin will first set up a local Linux bridge in the root network namespace to serve all containers on that host
-1. It will then insert an interface (one end of a veth pair) into the pause container's network namespace and attach the other end to the bridge. The best way to think about a veth pair is like a big tube: one side is connected to the container and the other side is in the root network namespace, allowing packets to travel inbetween. 
-1. It should then assign an IP to the pause container's interface and set up the routes. This will result in the Pod having its own IP address. IP assignment is delegated to the IPAM providers specified to the JSON configuration. 
+1. It will then insert an interface (one end of a veth pair) into the pause container's network namespace and attach the other end to the bridge. The best way to think about a veth pair is like a big tube: one side is connected to the container and the other side is in the root network namespace, allowing packets to travel inbetween.
+1. It should then assign an IP to the pause container's interface and set up the routes. This will result in the Pod having its own IP address. IP assignment is delegated to the IPAM providers specified to the JSON configuration.
     - IPAM plugins are similar to main network plugins: they are invoked via a binary and have a standardised interface. Each must determine the IP/subnet of the container's interface, along with the gateway and routes, and return this information back to the main plugin. The most common IPAM plugin is called `host-local` and allocates IP addresses out of a predefined set of address ranges. It stores the state locally on the host filesystem, therefore ensuring uniqueness of IP addresses on a single host.
-1. For DNS, the kubelet will specify the internal DNS server IP address to the CNI plugin, which will ensure that the container's `resolv.conf` file is set appropriately. 
+1. For DNS, the kubelet will specify the internal DNS server IP address to the CNI plugin, which will ensure that the container's `resolv.conf` file is set appropriately.
 
-Once the process is complete, the plugin will return JSON data back to the kubelet indicating the result of the operation. 
+Once the process is complete, the plugin will return JSON data back to the kubelet indicating the result of the operation.
 
 ### Inter-host networking
 
@@ -324,9 +324,9 @@ This is usually accomplished using a concept called overlay networking, which is
 
 ### Container startup
 
-All the networking shenanigans are done and out of the way. What's left? Well we need to actually start out workload containers. 
+All the networking shenanigans are done and out of the way. What's left? Well we need to actually start out workload containers.
 
-Once the sandbox has finished initializing and is active, the kubelet can begin creating containers for it. It first [starts any init containers](https://github.com/kubernetes/kubernetes/blob/5adfb24f8f25a0d57eb9a7b158db46f9f46f0d80/pkg/kubelet/kuberuntime/kuberuntime_manager.go#L690) as defined in the PodSpec, and will then start the main containers themselves. The process for doing this is: 
+Once the sandbox has finished initializing and is active, the kubelet can begin creating containers for it. It first [starts any init containers](https://github.com/kubernetes/kubernetes/blob/5adfb24f8f25a0d57eb9a7b158db46f9f46f0d80/pkg/kubelet/kuberuntime/kuberuntime_manager.go#L690) as defined in the PodSpec, and will then start the main containers themselves. The process for doing this is:
 
 1. [Pull the image](https://github.com/kubernetes/kubernetes/blob/5f9f4a1c5939436fa320e9bc5973a55d6446e59f/pkg/kubelet/kuberuntime/kuberuntime_container.go#L90) for the container. Any secrets that are defined in the PodSpec are used for private registries.
 1. [Create the container](https://github.com/kubernetes/kubernetes/blob/5f9f4a1c5939436fa320e9bc5973a55d6446e59f/pkg/kubelet/kuberuntime/kuberuntime_container.go#L115) via CRI. It does this by populating a `ContainerConfig` struct (in which the command, image, labels, mounts, devices, environment variables etc. are defined) from the parent PodSpec and then sending that via protobufs to the CRI plugin. For Docker, it deserializes the payload and populates its own config structures to send to the Daemon API. In the process it applies a few metadata labels (such container type, log path, sandbox ID) to the container.
@@ -338,4 +338,4 @@ Once the sandbox has finished initializing and is active, the kubelet can begin 
 
 Okay, phew. Done. Finito.
 
-After all this, we should have 3 containers running on one or more worker nodes. All of the networking, volumes and secrets have been populated by the kubelet and made into containers via the CRI plugin. 
+After all this, we should have 3 containers running on one or more worker nodes. All of the networking, volumes and secrets have been populated by the kubelet and made into containers via the CRI plugin.

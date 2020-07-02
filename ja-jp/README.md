@@ -12,11 +12,11 @@ Kubernetes の素晴らしいところの1つは、ユーザーフレンドリ�
 
 これ文書は鋭意作成中です。改善や書き換えが可能な部分を見つけたら、ぜひコントリビューションしてください！
 
-## contents
+## Contents
 
 1. [kubectl](#kubectl)
    - [バリデーションとジェネレーター](#バリデーションとジェネレーター)
-   - [APIグループとバージョンネゴシエーション](#APIグループとバージョンネゴシエーション)
+   - [APIグループとバージョンネゴシエーション](#apiグループとバージョンネゴシエーション)
    - [クライアント認証](#クライアント認証)
 1. [kube-apiserver](#kube-apiserver)
    - [認証](#認証)
@@ -25,14 +25,14 @@ Kubernetes の素晴らしいところの1つは、ユーザーフレンドリ�
 1. [etcd](#etcd)
 1. [イニシャライザー](#イニシャライザー)
 1. [コントロールループ](#コントロールループ)
-   - [Deploymentコントローラー](#Deploymentコントローラー)
-   - [Replicasets controller](#Replicasetコントローラー)
+   - [Deploymentコントローラー](#deploymentコントローラー)
+   - [ReplicaSetコントローラー](#replicasetコントローラー)
    - [インフォーマー](#インフォーマー)
    - [スケジューラー](#スケジューラー)
 1. [kubelet](#kubelet)
-   - [Pod同期](#Pod同期)
-   - [CRIと一時停止コンテナ](#CRIと一時停止コンテナ)
-   - [CNIとpodネットワーキング](#CNIとpodネットワーキング)
+   - [Pod同期](#pod同期)
+   - [CRIと一時停止コンテナ](#criと一時停止コンテナ)
+   - [CNIとpodネットワーキング](#cniとpodネットワーキング)
    - [ホスト間ネットワーキング](#ホスト間ネットワーキング)
    - [コンテナの起動](#コンテナの起動)
 1. [まとめ](#まとめ)
@@ -199,7 +199,7 @@ Deployment レコードが etcd に保存され初期化された後、それは
 
 次に[ステータスが更新され](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L70)、Deployment が期待された完了状態に一致するのを待つのと同じ調整ループに戻ります。Deployment コントローラーは ReplicaSet の作成についてのみ関心をもつので、この調整ステージは次のコントローラーである ReplicaSet コントローラによって継続する必要があります。
 
-# ReplicaSetコントローラー
+### ReplicaSetコントローラー
 
 前のステップでは、Deployment コントローラーは、Deployment の最初の ReplicaSet を作成しましたが、まだ Pod はありません。ここで ReplicaSet コントローラーの出番です！仕事は # ReplicaSet とその依存リソース（ Pod ）のライフサイクルを監視することです。他のほとんどのコントローラーと同様に、特定のイベントでハンドラを起動することによって実現されます。
 
@@ -224,7 +224,7 @@ Owner Reference 設計のもう1つの小さな利点はステートフルであ
 
 インフォーマーがコントローラーに関してどのように機能するかについての詳細は、[このブログ投稿](http://borismattijssen.github.io/articles/kubernetes-informers-controllers-reflectors-stores)をチェックしてください。
 
-# スケジューラー
+### スケジューラー
 
 すべてのコントローラが実行されると、Deployment、ReplicaSet、および3つの Pod が etcd に格納され、kube-apiserver を通じて使用可能になります。しかしながら、私たちの Pod はまだ Node にスケジュールされていないので、 `Pending` 状態のままです。これを解決する最後のコントローラはスケジューラーです。
 
@@ -333,7 +333,7 @@ kubelet が pod 用のネットワークを設定すると、タスクを「CNI�
 1. コンテナか[開始され](https://github.com/kubernetes/kubernetes/blob/5f9f4a1c5939436fa320e9bc5973a55d6446e59f/pkg/kubelet/kuberuntime/kuberuntime_container.go#L135)ます。
 1. 起動後のコンテナライフサイクルフックが登録されている場合は[実行](https://github.com/kubernetes/kubernetes/blob/5f9f4a1c5939436fa320e9bc5973a55d6446e59f/pkg/kubelet/kuberuntime/kuberuntime_container.go#L156-L170)されます。フックは `Exec`（コンテナ内の特定のコマンドを実行する）か` HTTP`（コンテナエンドポイントに対してHTTPリクエストを実行する）のどちらかです。PostStartフックの実行に時間がかかりすぎたり、ハングアップしたり、失敗したりした場合、コンテナは決して `running` 状態にはなりません。
 
-### まとめ
+## まとめ
 
 完了です。
 
