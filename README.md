@@ -151,7 +151,7 @@ That's a lot of steps! It's pretty amazing to follow the crumbs down the rabbit 
 
 ## Initializers
 
-After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [initializer](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registered, this initialization step is skipped and resources are made visible immediately.
+After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [initializers](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registered, this initialization step is skipped and resources are made visible immediately.
 
 As [many great blog posts](https://ahmet.im/blog/initializers/) have pointed out, this is a powerful feature because it allows us to perform generic bootstrap operations. Examples could be:
 
