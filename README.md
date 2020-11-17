@@ -151,7 +151,7 @@ That's a lot of steps! It's pretty amazing to follow the crumbs down the rabbit 
 
 ## Initializers
 
-After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [intializers](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registered, this initialization step is skipped and resources are made visible immediately.
+After an object is persisted to the datastore, it is not made fully visible by the apiserver or scheduled until a series of [initializers](https://kubernetes.io/docs/admin/extensible-admission-controllers/#initializers) have run. An initializer is a controller that is associated with a resource type and performs logic on the resource before it's made available to the outside world. If a resource type has zero initializers registered, this initialization step is skipped and resources are made visible immediately.
 
 As [many great blog posts](https://ahmet.im/blog/initializers/) have pointed out, this is a powerful feature because it allows us to perform generic bootstrap operations. Examples could be:
 
@@ -179,7 +179,7 @@ initializers:
 
 After creating this config, it will append `custom-pod-initializer` to every Pod's `metadata.initializers.pending` field. The initializer controller would already be deployed and would be routinely scanning for new Pods. When the initializer detects one with its name in the Pod's pending field, it will perform its logic. After it completes its process, it removes its name from the pending list. Only initializers whose name is first in the list may operate on the resource. When all initializers finish and the `pending` field is empty, the object will be considered initialized.
 
-The eagle-eyed of you may have a spotted a potential problem. How can a userland controller process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even unitialized ones.
+The eagle-eyed of you may have a spotted a potential problem. How can a userland controller process resources if those resources are not made visible by kube-apiserver? To get around this problem, kube-apiserver exposes a `?includeUninitialized` query parameter which returns _all_ objects, even uninitialized ones.
 
 ## Control loops
 
@@ -187,16 +187,16 @@ The eagle-eyed of you may have a spotted a potential problem. How can a userland
 
 By this stage, our Deployment record exists in etcd and any initialization logic has completed. The next stages involve us setting up the resource topology that Kubernetes relies on. When we think about it, a Deployment is really just a collection of ReplicaSets, and a ReplicaSet is a collection of Pods. So how does Kubernetes go about creating this hierarchy from one HTTP request? This is where Kubernetes' built-in controllers take over.
 
-Kubernetes makes strong use of "controllers" throughout the system. A controller is an asychronous script that works to reconcile the
+Kubernetes makes strong use of "controllers" throughout the system. A controller is an asynchronous script that works to reconcile the
 current state of the Kubernetes system to a desired state. Each controller has a small responsibility and is run in parallel by the `kube-controller-manager` component. Let's introduce ourselves to the first one that takes over, the Deployment controller.
 
 After a Deployment record is stored to etcd and initialized, it is made visible via kube-apiserver. When this new resource is available, it is detected by the Deployment controller, whose job it is to listen out for changes to Deployment records. In our case, the controller [registers a specific callback](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L122) for create events via an informer (see below for more information about what this is).
 
-This handler will be executed when our Deployment first becomes available and will start by [adding the object to an internal work queue](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L170). By the time it gets around to processing our object, the controller will [inspect our Deployment](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L572) and [realise](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L633) that there are no ReplicaSet or Pod records associated with it. It does this by querying kube-apiserver with label selectors. What's interesting to note is that this sychronization process is state agnostic: it reconciles new records in the same way as existing ones.
+This handler will be executed when our Deployment first becomes available and will start by [adding the object to an internal work queue](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L170). By the time it gets around to processing our object, the controller will [inspect our Deployment](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L572) and [realise](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/deployment_controller.go#L633) that there are no ReplicaSet or Pod records associated with it. It does this by querying kube-apiserver with label selectors. What's interesting to note is that this synchronization process is state agnostic: it reconciles new records in the same way as existing ones.
 
 After realising none exist, it will begin a [scaling process](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L385) to start resolving state. It does this by rolling out (i.e. creating) a ReplicaSet resource, assigning it a label selector, and giving it the revision number of 1. The ReplicaSet's PodSpec is copied from the Deployment's manifest, as well as other relevant metadata. Sometimes the Deployment record will need to be updated after this as well (for instance if the progress deadline is set).
 
-The [status is then updated](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L70) and it then re-enters the same reconciliation loop waiting for the deployment to match a desired, completed state. Since the Deployment controller is only concerned about creating ReplicaSets, this reconcilation stage needs to be continued by the next controller, the ReplicaSet controller.
+The [status is then updated](https://github.com/kubernetes/kubernetes/blob/master/pkg/controller/deployment/sync.go#L70) and it then re-enters the same reconciliation loop waiting for the deployment to match a desired, completed state. Since the Deployment controller is only concerned about creating ReplicaSets, this reconciliation stage needs to be continued by the next controller, the ReplicaSet controller.
 
 ### ReplicaSets controller
 
@@ -243,7 +243,7 @@ When kube-apiserver receives this Binding object, the registry deserializes the 
 
 Once the scheduler has scheduled a Pod to a Node, the kubelet on that Node can take over to begin the deployment. Exciting!
 
-**Side note: customising the scheduler:** What's interesting is that both predicate and priority functions are extensible and can be defined by using the `--policy-config-file` flag. This introduces a degree of flexibility. Administrators can also run custom schedulers (controllers with custom processing logic) in standalone Deployments. If a PodSpec contains `schedulerName`, Kubernetes will hand over scheduling for that pod to whatever scheduler thas has registered itself under that name.
+**Side note: customising the scheduler:** What's interesting is that both predicate and priority functions are extensible and can be defined by using the `--policy-config-file` flag. This introduces a degree of flexibility. Administrators can also run custom schedulers (controllers with custom processing logic) in standalone Deployments. If a PodSpec contains `schedulerName`, Kubernetes will hand over scheduling for that pod to whatever scheduler that has registered itself under that name.
 
 ## kubelet
 
@@ -253,7 +253,7 @@ Okay, the main controller loop has finished, phew! Let's summarise: the HTTP req
 
 The kubelet is an agent that runs on every node in a Kubernetes cluster and is responsible for, among other things, managing the lifecycle of Pods. This means it handles all of the translation logic between the abstraction of a "Pod" (which is really just a Kubernetes concept) and its building blocks, containers. It also handles all of the associated logic around mounting volumes, container logging, garbage collection, and many more important things.
 
-A useful way of thinking about the kubelet is again like a controller! It queries Pods from kube-apiserver every 20 seconds (this is configurable), filtering the ones whose `NodeName` [matches the name](https://github.com/kubernetes/kubernetes/blob/3b66adb8bc6929e1205bcb2bc32f380c39be8381/pkg/kubelet/config/apiserver.go#L34) of the node the kubelet is running on. Once it has that list, it detects new additions by comparing against its own internal cache and begins to synchronise state if any discrepencies exist. Let's take a look at what that synchronization process looks like:
+A useful way of thinking about the kubelet is again like a controller! It queries Pods from kube-apiserver every 20 seconds (this is configurable), filtering the ones whose `NodeName` [matches the name](https://github.com/kubernetes/kubernetes/blob/3b66adb8bc6929e1205bcb2bc32f380c39be8381/pkg/kubelet/config/apiserver.go#L34) of the node the kubelet is running on. Once it has that list, it detects new additions by comparing against its own internal cache and begins to synchronise state if any discrepancies exist. Let's take a look at what that synchronization process looks like:
 
 1. If the pod is being created (ours is!), it [registers some startup metrics](https://github.com/kubernetes/kubernetes/blob/fc8bfe2d8929e11a898c4557f9323c482b5e8842/pkg/kubelet/kubelet.go#L1519) that is used in Prometheus for tracking pod latency.
 1. It then [generates a PodStatus](https://github.com/kubernetes/kubernetes/blob/dd9981d038012c120525c9e6df98b3beb3ef19e1/pkg/kubelet/kubelet_pods.go#L1287) object, which represents the state of a Pod's current Phase. The Phase of a Pod is a high-level summary of where the Pod is in its lifecycle. Examples include `Pending`, `Running`, `Succeeded`, `Failed` and `Unknown`. Generating this state is quite complicated, so let's dive into exactly what happens:
