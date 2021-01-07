@@ -84,7 +84,7 @@ After parsing the file, it then determines the current context to use, the curre
 
 ### Authentication
 
-So our request has been sent, hooray! What next? This is where kube-apiserver enters the picture. As we've already mentioned, kube-apiserver is the primary interface that clients and system components use to persist and retrieve cluster state. To perform its function, it needs to be able to verify that the requester is who they say there are. This process is called authentication.
+So our request has been sent, hooray! What next? This is where kube-apiserver enters the picture. As we've already mentioned, kube-apiserver is the primary interface that clients and system components use to persist and retrieve cluster state. To perform its function, it needs to be able to verify that the requester is who they say they are. This process is called authentication.
 
 How does the apiserver authenticate requests? When the server first starts, it looks at all the [CLI flags](https://kubernetes.io/docs/admin/kube-apiserver/) the user provided and assembles a list of suitable authenticators. Let's take an example: if a `--client-ca-file` has been passed in, it appends the x509 authenticator; if it sees `--token-auth-file` provided, it appends the token authenticator to the list. Every time a request is received, it is [run through the authenticator chain until one succeeds](https://github.com/kubernetes/apiserver/blob/51bebaffa01be9dc28195140da276c2f39a10cd4/pkg/authentication/request/union/union.go#L54):
 
