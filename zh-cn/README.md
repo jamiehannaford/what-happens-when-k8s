@@ -379,7 +379,7 @@ flannel 不会管容器与宿主机之间的通信（这是 CNI 插件的职责�
 
 所有的网络配置都已完成。还剩什么？真正地启动工作负载容器！
 
-一旦 `sanbox` 完成初始化并处于 `active` 状态， Kubelet 将开始为其创建容器。首先[启动 PodSpec 中定义的 Init Container](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubelet/kuberuntime/kuberuntime_manager.go#L736)，然后再启动主容器。具体过程如下：
+一旦沙箱完成初始化并处于 `active` 状态， Kubelet 将开始为其创建容器。首先[启动 PodSpec 中定义的 Init Container](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubelet/kuberuntime/kuberuntime_manager.go#L736)，然后再启动主容器。具体过程如下：
 
 1. [拉取容器的镜像](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubelet/kuberuntime/kuberuntime_container.go#L95)。如果是私有仓库的镜像，就会使用 PodSpec 中指定的 imagePullSecrets 来拉取该镜像；
 1. [通过 CRI 创建容器](https://github.com/kubernetes/kubernetes/blob/v1.14.0/pkg/kubelet/kuberuntime/kuberuntime_container.go#L124)。 Kubelet 使用 PodSpec 中的信息填充了一个 `ContainerConfig` 数据结构（在其中定义了 command， image， labels， mounts， devices， environment variables 等），然后通过 protobufs 发送给 CRI。 对于 Docker 来说，它会将这些信息反序列化并填充到自己的配置信息中，然后再发送给 Dockerd 守护进程。在这个过程中，它会将一些元数据（例如容器类型，日志路径，sandbox ID 等）添加到容器中；
