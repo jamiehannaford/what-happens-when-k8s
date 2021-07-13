@@ -71,7 +71,7 @@ In order to send the request successfully, kubectl needs to be able to authentic
 
 - if a `--kubeconfig` flag is provided, use that.
 - if the `$KUBECONFIG` environment variable is defined, use that.
-- otherwise look in a [predictable home directory](https://github.com/kubernetes/client-go/blob/master/tools/clientcmd/loader.go#L52) like `~/.kube`, and use the first file found.
+- otherwise look in the [recommended home directory](https://github.com/kubernetes/client-go/blob/release-1.21/tools/clientcmd/loader.go#L43) like `~/.kube`, and use the first file found.
 
 After parsing the file, it then determines the current context to use, the current cluster to point to, and any auth information associated with the current user. If the user provided flag-specific values (such as `--username`) these take precedence and will override those specified in kubeconfig. Once it has this information, kubectl populates the client's configuration so that it is able to decorate the HTTP request appropriately:
 
