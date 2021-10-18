@@ -131,8 +131,8 @@ v1.8に含まれているオーソライザーの例は次のとおりです。
 
 kube-apiserver はリクエストを受けたとき、どのようにして何をすべきかを知るのでしょうか？リクエストが処理される前にはかなり複雑な一連のステップがあります。バイナリを最初に実行したときから始めましょう。
 
-1. `kube-apiserver` バイナリが実行されると、サーバーチェーンを作成します。これにより　apiserver 集約が可能になります。これは基本的に複数の apiserver をサポートする方法です（これについて心配する必要はありません）。
-1. これが起こると、デフォルトの実装として機能する[汎用的な apiserver が作成](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/server.go#L149)されます。
+1. `kube-apiserver` バイナリが実行されると、[サーバーチェーンを作成](https://github.com/kubernetes/kubernetes/blob/1795a98eebe58fcce3b9b0a8af35d10bf91cee5b/cmd/kube-apiserver/app/server.go#L174)します。これにより　apiserver 集約が可能になります。これは基本的に複数の apiserver をサポートする方法です（これについて心配する必要はありません）。
+1. これが起こると、デフォルトの実装として機能する[汎用的な apiserver が作成](https://github.com/kubernetes/kubernetes/blob/1795a98eebe58fcce3b9b0a8af35d10bf91cee5b/cmd/kube-apiserver/app/server.go#L210)されます。
 1. 生成された OpenAPI スキーマが [apiserver の設定](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/server/config.go#L149)を取り込みます。
 1. kube-apiserver は、スキーマで指定されているすべての API グループを反復処理し、それぞれに対して汎用的な抽象ストレージとして機能する[ストレージプロバイダー](https://github.com/kubernetes/kubernetes/blob/c7a1a061c3dc5acabcc0c35b3b96a6935dccf546/pkg/master/master.go#L410)を設定します。これがkube-apiserver がリソースの状態にアクセスしたり変更したりする対象です。
 1. すべてのAPIグループに対して各グループバージョンについても繰り返し、HTTP ルートごとに[REST マッピングをインストール](https://github.com/kubernetes/apiserver/blob/7001bc4df8883d4a0ec84cd4b2117655a0009b6c/pkg/endpoints/groupversion.go#L92)します。これにより kube-apiserver はリクエストをマッピングし、一致するものが見つかったら正しいロジックに委任することができるようになります。
