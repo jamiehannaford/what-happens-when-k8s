@@ -71,7 +71,7 @@ Deployment リソースを作成したいことが認識された後、提供さ
 
 - `--kubeconfig` フラグが指定されている場合はそれを使います。
 - `$ KUBECONFIG` 環境変数が定義されている場合はそれを使います。
-- その他は `~/.kube` のような[予測可能なホームディレクトリ](https://github.com/kubernetes/client-go/blob/master/tools/clientcmd/loader.go#L52)を探し、見つかった最初のファイルを使います。
+- その他は `~/.kube` のような[推奨されるホームディレクトリ](https://github.com/kubernetes/client-go/blob/release-1.21/tools/clientcmd/loader.go#L43)を探し、見つかった最初のファイルを使います。
 
 ファイルを解析した後、使用する現在のコンテキスト、指す現在のクラスタ、現在のユーザーに紐付けられている認証情報を決定します。ユーザーがフラグ固有の値（ `--username` など）を指定した場合、それらが優先され、kubeconfig で指定された値を上書きします。この情報が得られるとkubectl はクライアントの設定を追加し、HTTP リクエストを適切に装飾できるようになります。
 
