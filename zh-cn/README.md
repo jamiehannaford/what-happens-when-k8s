@@ -271,7 +271,7 @@ Scheduler 作为一个独立的组件运行在集群控制平面上，工作方�
 
 一旦 Scheduler 将 Pod 调度到某个节点上，该节点的 Kubelet 就会接管该 Pod 并开始部署。
 
-附注：自定义调度器：有趣的是预测和优先级函数 （predicates and priority functions） 都是可扩展的，可以使用参数 `--policy-config-file` 来定义。这引入了一定程度的灵活性。管理员还可以在独立部署中运行自定义调度器（具有自定义处理逻辑的调度器）。如果 PodSpec 中包含 `schedulerName`，Kubernetes 会将该 pod 的调度移交给使用该名称注册的调度器。
+附注：自定义调度器：有趣的是预选策略和优先级函数 （predicates and priority functions） 都是可扩展的，可以使用参数 `--policy-config-file` 来定义。这引入了一定程度的灵活性。管理员还可以在独立部署中运行自定义调度器（具有自定义处理逻辑的调度器）。如果 PodSpec 中包含 `schedulerName`，Kubernetes 会将该 pod 的调度移交给使用该名称注册的调度器。
 
 ## Kubelet
 
