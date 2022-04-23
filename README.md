@@ -3,7 +3,7 @@
 Imagine I want to deploy nginx to a Kubernetes cluster. I'd probably type something like this in my terminal:
 
 ```bash
-kubectl run nginx --image=nginx --replicas=3
+kubectl create deployment nginx --image=nginx --replicas=3
 ```
 
 and hit enter. After a few seconds, I should see three nginx pods spread across all my worker nodes. It works like magic, and that's great! But what's really going on under the hood?
