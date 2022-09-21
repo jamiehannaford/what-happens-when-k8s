@@ -3,7 +3,7 @@
 nginx を Kubernetes クラスターにデプロイしたいとしましょう。私はおそらくターミナルでつぎのようなコマンドをタイプするでしょう。
 
 ```bash
-kubectl run --image=nginx --replicas=3
+kubectl create deployment --image=nginx --replicas=3
 ```
 
 そしてエンターキーを押します。数秒後、3つの nginx ポッドがすべてのワーカーノードに展開されているのがわかるでしょう。魔法のように動作し、素晴らしいです！しかし、実際のところ何が起こっているのでしょうか。
