@@ -111,7 +111,7 @@ Check out the `Authorize` method for each one to see how they work!
 
 ### Admission control
 
-Okay, so by this point we've authenticated and have been authorized by the kube-apiserver. So what's left? From kube-apiserver's perspective, it believes who we are and permits us to continue, but with Kubernetes, other parts of the system have strong opinions about what should and should not be permitted to happen. This is where [admission controllers](https://kubernetes.io/docs/admin/admission-controllers/#what-are-they) enter the picture.
+Okay, so by this point we've authenticated and have been authorized by the kube-apiserver. So what's left? From kube-apiserver's perspective, it believes who we are and permits us to continue, but with Kubernetes, other parts of the system have strong opinions about what should and should not be permitted to happen. This is where [admission controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#what-are-they) enter the picture.
 
 Whilst authorization is focused on answering whether a user has permission, admission controllers intercept the request to ensure that it matches the wider expectations and rules of the cluster. They are the last bastion of control before an object is persisted to etcd, so they encapsulate the remaining system checks to ensure an action does not produce unexpected or negative results.
 
